@@ -17,6 +17,7 @@ struct SidebarView: View {
                 Button(action: importFiles) {
                     Image(systemName: "plus")
                 }.help("Import BRAW files")
+                .disabled(project.isExporting)
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             
@@ -31,7 +32,9 @@ struct SidebarView: View {
                             
                             ClipRowView(clip: clip, isActive: isActive, isSelected: isSelected)
                                 .contentShape(Rectangle())
+                                .onAppear { clip.loadThumbnail() }
                                 .onTapGesture {
+                                    guard !project.isExporting else { return }
                                     if NSEvent.modifierFlags.contains(.command) {
                                         if selectedIndices.contains(index) {
                                             selectedIndices.remove(index)
@@ -72,12 +75,17 @@ struct SidebarView: View {
     
     func importFiles() {
         let panel = NSOpenPanel()
-        guard let brawType = UTType(filenameExtension: "braw") else { return }
-        panel.allowedContentTypes = [brawType]
         panel.allowsMultipleSelection = true
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        if let brawType = UTType(filenameExtension: "braw") {
+            panel.allowedContentTypes = [brawType, UTType.data].compactMap { $0 }
+        }
         if panel.runModal() == .OK {
             for url in panel.urls {
-                _ = project.importClip(path: url.path)
+                if url.pathExtension.lowercased() == "braw" {
+                    _ = project.importClip(path: url.path)
+                }
             }
         }
     }

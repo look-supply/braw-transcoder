@@ -10,6 +10,13 @@
 
 class BrawDecoderCallback;
 
+struct DecodedFrame {
+    int width = 0;
+    int height = 0;
+    int bytesPerRow = 0;
+    std::vector<uint8_t> pixels;
+};
+
 struct BrawDecoder::Impl {
     IBlackmagicRawFactory* factory = nullptr;
     IBlackmagicRaw*        codec   = nullptr;
@@ -43,19 +50,20 @@ struct BrawDecoder::Impl {
 
     std::atomic<bool> callbackInvoked{false};
 
-    // Owned staging buffer with pixel data, populated immediately in ProcessComplete
     id<MTLBuffer> stagingBuffer = nil;
 
-    // Per-decoder callback (not static — avoids race with multi-clip decode)
     BrawDecoderCallback* callback = nullptr;
     std::mutex callbackMutex;
 
-    // Native camera settings captured from first decoded frame
     bool nativeCaptured = false;
     uint32_t nativeISO = 800;
     uint32_t nativeColorTemp = 5600;
     int16_t nativeTint = 0;
     float nativeExposure = 0.0f;
+
+    // Batch decode support (parallel CPU decode across cores)
+    std::vector<DecodedFrame> batchResults;
+    std::atomic<int> batchPending{0};
 
     static CFStringRef ToCFString(const std::string& s) {
         return CFStringCreateWithCString(kCFAllocatorDefault, s.c_str(), kCFStringEncodingUTF8);
@@ -278,13 +286,14 @@ bool BrawDecoder::OpenClip(const std::string& path) {
     m_impl->cameraType = Impl::FromCFString(camType);
     if (camType) CFRelease(camType);
 
-    m_impl->metalDevice = MTLCreateSystemDefaultDevice();
-    m_impl->metalQueue  = [m_impl->metalDevice newCommandQueue];
-
+    // Callback is always needed (for async job completion)
     m_impl->callback = new BrawDecoderCallback();
     m_impl->callback->impl = m_impl.get();
     m_impl->codec->SetCallback(m_impl->callback);
 
+    // Metal pipeline (required for GPU decode; CPU decode works through this too)
+    m_impl->metalDevice = MTLCreateSystemDefaultDevice();
+    m_impl->metalQueue  = [m_impl->metalDevice newCommandQueue];
     m_impl->codec->PreparePipeline(
         blackmagicRawPipelineMetal,
         (__bridge void*)m_impl->metalDevice,
@@ -296,7 +305,6 @@ bool BrawDecoder::OpenClip(const std::string& path) {
 
 void BrawDecoder::Close() {
     if (m_impl->codec) {
-        m_impl->codec->FlushJobs();
         m_impl->codec->Release();
         m_impl->codec = nullptr;
     }
@@ -366,9 +374,8 @@ void BrawDecoder::RequestFrame(uint64_t frameIndex,
 }
 
 void BrawDecoder::FlushJobs() {
-    if (m_impl->codec) {
-        m_impl->codec->FlushJobs();
-    }
+    // FlushJobs hangs in some SDK versions; skip it.
+    // Jobs are completed synchronously via RequestFrame's CV wait.
 }
 
 void BrawDecoder::CaptureNativeSettings() {
@@ -402,6 +409,45 @@ std::vector<uint8_t> BrawDecoder::DecodeFrameSync(uint64_t frameIndex,
     }, scale);
 
     return result;
+}
+
+void* BrawDecoder::DecodeFrameGPU(uint64_t frameIndex,
+                                    int* outWidth, int* outHeight,
+                                    int* outBytesPerRow,
+                                    const ClipAdjustments& adjustments) {
+    if (!m_impl->clip || !m_impl->codec) return nullptr;
+
+    void* retainedBuf = nullptr;
+
+    RequestFrame(frameIndex, adjustments, [&retainedBuf, outWidth, outHeight, outBytesPerRow](void* bufPtr, int w, int h, int bytesPerRow) {
+        *outWidth = w;
+        *outHeight = h;
+        *outBytesPerRow = bytesPerRow;
+        id<MTLBuffer> buf = (__bridge id<MTLBuffer>)bufPtr;
+        retainedBuf = (__bridge_retained void*)buf;
+    }, 1.0f);
+
+    return retainedBuf;
+}
+
+void* BrawDecoder::DecodeFrameGPUScaled(uint64_t frameIndex,
+                                         int* outWidth, int* outHeight,
+                                         int* outBytesPerRow,
+                                         const ClipAdjustments& adjustments,
+                                         float scale) {
+    if (!m_impl->clip || !m_impl->codec) return nullptr;
+
+    void* retainedBuf = nullptr;
+
+    RequestFrame(frameIndex, adjustments, [&retainedBuf, outWidth, outHeight, outBytesPerRow](void* bufPtr, int w, int h, int bytesPerRow) {
+        *outWidth = w;
+        *outHeight = h;
+        *outBytesPerRow = bytesPerRow;
+        id<MTLBuffer> buf = (__bridge id<MTLBuffer>)bufPtr;
+        retainedBuf = (__bridge_retained void*)buf;
+    }, scale);
+
+    return retainedBuf;
 }
 
 uint32_t BrawDecoder::GetNativeISO() const { return m_impl->nativeISO; }
@@ -458,4 +504,33 @@ uint16_t BrawDecoder::GetColorScienceGen() const {
     VariantClear(&v);
     attrs->Release();
     return result;
+}
+
+float* BrawDecoder::ExtractAudio(uint32_t* outSampleRate, uint32_t* outChannels,
+                                   uint64_t* outSampleCount) {
+    if (!m_impl->clip) return nullptr;
+
+    IBlackmagicRawClipAudio* audio = nullptr;
+    HRESULT hr = m_impl->clip->QueryInterface(IID_IBlackmagicRawClipAudio, (void**)&audio);
+    if (FAILED(hr) || !audio) return nullptr;
+
+    audio->GetAudioSampleRate(outSampleRate);
+    audio->GetAudioChannelCount(outChannels);
+    audio->GetAudioSampleCount(outSampleCount);
+
+    if (*outSampleCount == 0 || *outChannels == 0) {
+        audio->Release();
+        *outSampleRate = 0; *outChannels = 0; *outSampleCount = 0;
+        return nullptr;
+    }
+
+    float* samples = (float*)malloc(*outSampleCount * *outChannels * sizeof(float));
+    if (samples) {
+        uint32_t samplesRead = 0, bytesRead = 0;
+        audio->GetAudioSamples(0, samples,
+                                (uint32_t)(*outSampleCount * *outChannels * sizeof(float)),
+                                (uint32_t)*outSampleCount, &samplesRead, &bytesRead);
+    }
+    audio->Release();
+    return samples;
 }

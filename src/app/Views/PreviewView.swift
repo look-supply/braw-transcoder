@@ -26,7 +26,7 @@ struct PreviewView: View {
             Divider()
             
             if let clip = project.selectedClip {
-                PreviewContent(clip: clip)
+                PreviewContent(clip: clip, isExporting: project.isExporting)
             } else {
                 GeometryReader { geo in
                     ZStack {
@@ -48,6 +48,7 @@ struct PreviewView: View {
 
 struct PreviewContent: View {
     @ObservedObject var clip: ClipModel
+    let isExporting: Bool
     
     var body: some View {
         GeometryReader { geo in
@@ -75,7 +76,6 @@ struct PreviewContent: View {
                     }
                 }
                 
-                // Frame jog slider
                 VStack {
                     Spacer()
                     VStack(spacing: 4) {
@@ -88,6 +88,7 @@ struct PreviewContent: View {
                                 set: { clip.currentFrame = UInt64($0) }
                             ), in: 0...Double(max(clip.frameCount, 1) - 1))
                             .controlSize(.small)
+                            .disabled(isExporting)
                             
                             Text("\(clip.currentFrame)").font(.system(size: 10, design: .monospaced))
                                 .foregroundColor(.white.opacity(0.7))

@@ -62,6 +62,7 @@ struct ExportView: View {
                     Picker("", selection: $selectedCodec) {
                         ForEach(0..<codecs.count, id: \.self) { i in Text(codecs[i]).tag(i) }
                     }.pickerStyle(.menu).frame(width: 100)
+                    .disabled(exportMgr.isExporting)
                 }
                 
                 if selectedCodec == 2 {
@@ -70,6 +71,7 @@ struct ExportView: View {
                         Picker("", selection: $selectedProResProfile) {
                             ForEach(0..<proResProfiles.count, id: \.self) { i in Text(proResProfiles[i]).tag(i) }
                         }.pickerStyle(.menu).frame(width: 120)
+                        .disabled(exportMgr.isExporting)
                     }
                 }
                 
@@ -78,6 +80,7 @@ struct ExportView: View {
                     Picker("", selection: $selectedResolution) {
                         ForEach(0..<resolutions.count, id: \.self) { i in Text(resolutions[i]).tag(i) }
                     }.pickerStyle(.menu).frame(width: 140)
+                    .disabled(exportMgr.isExporting)
                 }
                 
                 if selectedCodec != 2 {
@@ -86,6 +89,7 @@ struct ExportView: View {
                         Picker("", selection: $selectedDataRate) {
                             ForEach(0..<dataRates.count, id: \.self) { i in Text(dataRates[i]).tag(i) }
                         }.pickerStyle(.menu).frame(width: 120)
+                        .disabled(exportMgr.isExporting)
                     }
                 }
                 
@@ -96,9 +100,11 @@ struct ExportView: View {
                     HStack(spacing: 4) {
                         TextField("~/Movies", text: $outputDir)
                             .textFieldStyle(.roundedBorder).frame(width: 160).font(.system(size: 11))
+                            .disabled(exportMgr.isExporting)
                         Button(action: pickOutputDir) {
                             Image(systemName: "folder")
                         }.buttonStyle(.borderless)
+                        .disabled(exportMgr.isExporting)
                     }
                 }
                 
@@ -138,11 +144,6 @@ struct ExportView: View {
             }
         }
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-        .onChange(of: project.selectedIndex) { _, _ in
-            if let clip = project.selectedClip, outputDir.isEmpty {
-                outputDir = clip.directoryPath
-            }
-        }
     }
     
     func pickOutputDir() {

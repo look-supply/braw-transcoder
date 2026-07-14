@@ -87,7 +87,7 @@ struct ClipAdjustments {
     int16_t  tint        = 0;
     float    exposure    = 0.0f;
     bool     highlightRecovery = false;
-    bool     previewLUT  = false;
+    bool     previewLUT  = true;
     bool     bakeLUT     = false;
 };
 

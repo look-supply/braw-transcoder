@@ -15,7 +15,7 @@ struct InspectorView: View {
             Divider()
             
             if let clip = project.selectedClip {
-                InspectorContent(clip: clip)
+                InspectorContent(clip: clip, isExporting: project.isExporting)
             } else {
                 Spacer()
                 VStack(spacing: 8) {
@@ -33,6 +33,7 @@ struct InspectorView: View {
 
 struct InspectorContent: View {
     @ObservedObject var clip: ClipModel
+    let isExporting: Bool
     
     var body: some View {
         ScrollView {
@@ -52,6 +53,7 @@ struct InspectorContent: View {
                             }
                             .pickerStyle(.menu)
                             .frame(maxWidth: .infinity)
+                            .disabled(isExporting)
                             
                             if clip.isoPresetIndex < 0 || clip.isoPresetIndex >= ClipModel.isoPresets.count {
                                 HStack {
@@ -63,6 +65,7 @@ struct InspectorContent: View {
                                         get: { Double(clip.iso) },
                                         set: { clip.iso = UInt32($0) }
                                     ), in: 100...25600).controlSize(.small)
+                                    .disabled(isExporting)
                                 }
                             }
                         }
@@ -80,6 +83,7 @@ struct InspectorContent: View {
                             }
                             .pickerStyle(.menu)
                             .frame(maxWidth: .infinity)
+                            .disabled(isExporting)
                             
                             if clip.colorPresetIndex < 0 || clip.colorPresetIndex >= ClipModel.colorPresets.count {
                                 VStack(spacing: 4) {
@@ -93,6 +97,7 @@ struct InspectorContent: View {
                                         get: { Double(clip.colorTemp) },
                                         set: { clip.colorTemp = UInt32($0) }
                                     ), in: 2000...50000).controlSize(.small)
+                                    .disabled(isExporting)
                                     
                                     HStack {
                                         Text("Tint").font(.system(size: 10)).foregroundColor(.secondary)
@@ -104,6 +109,7 @@ struct InspectorContent: View {
                                         get: { Double(clip.tint) },
                                         set: { clip.tint = Int16($0) }
                                     ), in: -50...50).controlSize(.small)
+                                    .disabled(isExporting)
                                 }
                             }
                         }
@@ -121,20 +127,24 @@ struct InspectorContent: View {
                                 get: { Double(clip.exposure) },
                                 set: { clip.exposure = Float($0) }
                             ), in: -5...5).controlSize(.small)
+                            .disabled(isExporting)
                         }
                     }
                     .padding(.vertical, 4)
                 }
                 
                 GroupBox(label: Text("Highlight Recovery").font(.headline)) {
-                    Toggle("Enable", isOn: $clip.highlightRecovery).padding(.vertical, 2)
+                    Toggle("Enable", isOn: $clip.highlightRecovery)
+                        .padding(.vertical, 2)
+                        .disabled(isExporting)
                 }
                 
                 GroupBox(label: Text("LUT").font(.headline)) {
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle("Preview Embedded LUT", isOn: $clip.previewLUT)
+                            .disabled(isExporting)
                         Toggle("Bake LUT into Output", isOn: $clip.bakeLUT)
-                            .disabled(!clip.previewLUT)
+                            .disabled(isExporting || !clip.previewLUT)
                     }
                     .padding(.vertical, 2)
                 }
@@ -149,6 +159,7 @@ struct InspectorContent: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .disabled(isExporting)
             .padding(.horizontal, 12)
             .padding(.bottom, 12)
         }

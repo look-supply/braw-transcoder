@@ -39,6 +39,7 @@ target_link_libraries(braw_core PRIVATE
     "-framework CoreFoundation"
     "-framework AppKit"
     "-framework AudioToolbox"
+    "-framework AVFoundation"
     "${BRAW_SDK_FRAMEWORK_DIR}/BlackmagicRawAPI.framework"
     PkgConfig::FFMPEG
 )
@@ -51,6 +52,7 @@ target_compile_options(braw_core PRIVATE
 add_executable(${PROJECT_NAME}
     src/app/BrawTranscoderApp.swift
     src/app/ProjectModel.swift
+    src/app/MetalPreviewRenderer.swift
     src/app/Views/ContentView.swift
     src/app/Views/SidebarView.swift
     src/app/Views/PreviewView.swift
@@ -96,3 +98,10 @@ add_executable(braw_test
 )
 target_include_directories(braw_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(braw_test PRIVATE braw_core)
+
+# ── Export Helper Binary (subprocess isolation) ──────
+add_executable(export_helper
+    src/bridge/export_helper.mm
+)
+target_include_directories(export_helper PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(export_helper PRIVATE braw_core)

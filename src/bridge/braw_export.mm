@@ -1,186 +1,401 @@
 #include "bridge/braw_api.h"
-#include "core/BrawDecoder.h"
 #include "core/Types.h"
-#include <VideoToolbox/VideoToolbox.h>
-#include <CoreVideo/CoreVideo.h>
-#include <CoreMedia/CoreMedia.h>
-#include <fstream>
+#import <AVFoundation/AVFoundation.h>
+#import <CoreMedia/CoreMedia.h>
+#import <Metal/Metal.h>
+#import <CoreVideo/CoreVideo.h>
 #include <atomic>
 #include <dispatch/dispatch.h>
+#include <unistd.h>
 
-static std::atomic<bool> g_exportRunning{false};
-static std::atomic<bool> g_exportCancel{false};
-static dispatch_queue_t g_exportQueue = nullptr;
+static std::atomic<bool> g_running{false};
+static std::atomic<bool> g_cancel{false};
 
-static void WriteNALUsToFile(const std::string& path, const void* data, size_t size, bool append) {
-    auto mode = append ? std::ios::binary | std::ios::app : std::ios::binary;
-    std::ofstream file(path, mode);
-    if (file.is_open()) file.write((const char*)data, size);
+// Callback for CVPixelBufferCreateWithBytes — frees the malloc'd pixel data
+static void pixelBufferReleaseCallback(void* ref, const void* data) {
+    braw_clip_free_frame((uint8_t*)data);
 }
 
-struct ExportContext {
-    BrawProjectHandle* project;
-    std::vector<int> indices;
-    int codec, proResProfile, resolutionMode, dataRateMbps;
-    std::string outputDir;
-    ExportProgressFn progressFn;
-    void* progressCtx;
-};
+// GPU decode for speed (18fps vs 2fps CPU). No decoder resets — one lifecycle
+// per clip. Subprocess isolation reclaims SDK memory on exit. No segmentation.
 
-static CMVideoCodecType CodecToCMType(int codec) {
-    switch (codec) {
-        case 0: return kCMVideoCodecType_H264;
-        case 1: return kCMVideoCodecType_HEVC;
-        case 2: return kCMVideoCodecType_AppleProRes4444;
-        default: return kCMVideoCodecType_HEVC;
-    }
-}
+static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
+                       uint64_t frameCount, int codec, int bitrate,
+                       const std::string& outPath,
+                       ExportProgressFn pf, void* pctx, int ci, int tc) {
+    @autoreleasepool {
+        uint32_t srcW = braw_clip_get_width(clip);
+        uint32_t srcH = braw_clip_get_height(clip);
 
-static void CompressionCallback(void* ctx, void*, OSStatus status, VTEncodeInfoFlags,
-                                 CMSampleBufferRef sampleBuffer) {
-    if (status != noErr || !sampleBuffer) return;
-    auto* path = (std::string*)ctx;
-    CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sampleBuffer);
-    if (!block) return;
-    size_t len = 0;
-    char* ptr = nullptr;
-    if (CMBlockBufferGetDataPointer(block, 0, nullptr, &len, &ptr) == noErr && ptr && len > 0) {
-        WriteNALUsToFile(*path, ptr, len, true);
-    }
-}
+        // CVPixelBufferPool for Metal-compatible pixel buffers (required by HEVC encoder)
+        NSDictionary* poolAttrs = @{
+            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+            (id)kCVPixelBufferWidthKey: @(srcW),
+            (id)kCVPixelBufferHeightKey: @(srcH),
+            (id)kCVPixelBufferMetalCompatibilityKey: @YES,
+            (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        };
+        CVPixelBufferPoolRef pxPool = NULL;
+        CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL, (__bridge CFDictionaryRef)poolAttrs, &pxPool);
 
-static bool ExportClip(BrawClipHandle* clip, const ExportContext& ctx, int clipIdx, int totalClips) {
-    uint64_t frameCount = braw_clip_get_frame_count(clip);
-    float fps = braw_clip_get_frame_rate(clip);
-    uint32_t srcW = braw_clip_get_width(clip);
-    uint32_t srcH = braw_clip_get_height(clip);
-
-    int outW, outH;
-    int heights[] = {0, 2160, 2160, 1080, 1080};
-    if (ctx.resolutionMode == 0 || heights[ctx.resolutionMode] == 0) {
-        outW = srcW; outH = srcH;
-    } else {
-        outH = heights[ctx.resolutionMode];
-        outW = (int)((float)outH * (float)srcW / (float)srcH);
-        outW = (outW + 1) & ~1;
-    }
-
-    float decodeScale = 1.0f;
-    if (outH > 0 && (int)srcH > outH) {
-        float ratio = (float)outH / (float)srcH;
-        if (ratio <= 0.125f)      decodeScale = 0.125f;
-        else if (ratio <= 0.25f)  decodeScale = 0.25f;
-        else if (ratio <= 0.5f)   decodeScale = 0.5f;
-    }
-
-    std::string baseName = braw_clip_get_filename(clip);
-    std::string ext = (ctx.codec == 2) ? ".mov" : ".mp4";
-    std::string outPath = ctx.outputDir + "/" + baseName + "_export" + ext;
-
-    VTCompressionSessionRef session = nullptr;
-    CMVideoCodecType cmCodec = CodecToCMType(ctx.codec);
-    OSStatus err = VTCompressionSessionCreate(
-        kCFAllocatorDefault, outW, outH, cmCodec,
-        NULL, NULL, NULL,
-        &CompressionCallback, (void*)&outPath, &session);
-    if (err != noErr) return false;
-
-    VTSessionSetProperty(session, kVTCompressionPropertyKey_RealTime, (__bridge CFTypeRef)@NO);
-    if (ctx.codec == 1)
-        VTSessionSetProperty(session, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main10_AutoLevel);
-
-    int bitrate = ctx.dataRateMbps * 1000000;
-    CFNumberRef cfBR = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bitrate);
-    VTSessionSetProperty(session, kVTCompressionPropertyKey_AverageBitRate, cfBR);
-    CFRelease(cfBR);
-    int keyFrame = (int)(fps * 2);
-    CFNumberRef cfKF = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &keyFrame);
-    VTSessionSetProperty(session, kVTCompressionPropertyKey_MaxKeyFrameInterval, cfKF);
-    CFRelease(cfKF);
-    float quality = 0.85f;
-    CFNumberRef cfQ = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloatType, &quality);
-    VTSessionSetProperty(session, kVTCompressionPropertyKey_Quality, cfQ);
-    CFRelease(cfQ);
-
-    VTCompressionSessionPrepareToEncodeFrames(session);
-    WriteNALUsToFile(outPath, nullptr, 0, false);
-
-    // Single reusable buffer — no per-frame alloc
-    size_t bufBytes = (size_t)outW * outH * 4;
-    std::vector<uint8_t> recycleBuf(bufBytes);
-
-    for (uint64_t fi = 0; fi < frameCount; fi++) {
-        if (g_exportCancel) break;
-
-        int fw = 0, fh = 0;
-        uint8_t* pixels = braw_clip_decode_frame_scaled(clip, fi, &fw, &fh, decodeScale);
-        if (!pixels) continue;
-
-        size_t frameBytes = (size_t)fw * fh * 4;
-        CVPixelBufferRef pxBuf = NULL;
-        CVReturn cvr = CVPixelBufferCreateWithBytes(
-            kCFAllocatorDefault, fw, fh, kCVPixelFormatType_32BGRA,
-            recycleBuf.data(), fw * 4, NULL, NULL, NULL, &pxBuf);
-
-        if (cvr == kCVReturnSuccess && pxBuf) {
-            CVPixelBufferLockBaseAddress(pxBuf, 0);
-            memcpy(recycleBuf.data(), pixels, frameBytes);
-            CVPixelBufferUnlockBaseAddress(pxBuf, 0);
-
-            CMTime pts = CMTimeMake((int64_t)fi, (int32_t)fps);
-            VTCompressionSessionEncodeFrame(session, pxBuf, pts, kCMTimeInvalid, NULL, NULL, NULL);
-            VTCompressionSessionCompleteFrames(session, kCMTimeInvalid);
-            CVPixelBufferRelease(pxBuf);
+        [[NSFileManager defaultManager] removeItemAtPath:[NSString stringWithUTF8String:outPath.c_str()] error:nil];
+        NSURL* url = [NSURL fileURLWithPath:@(outPath.c_str())];
+        NSError* err = nil;
+        AVAssetWriter* writer = [[AVAssetWriter alloc] initWithURL:url
+                                                           fileType:AVFileTypeQuickTimeMovie
+                                                              error:&err];
+        if (!writer) {
+            fprintf(stderr, "AVAssetWriter create failed: %s\n", [[err description] UTF8String]);
+            if (pxPool) CVPixelBufferPoolRelease(pxPool);
+            return false;
         }
 
-        braw_clip_free_frame(pixels);
+        NSDictionary* vidSettings = @{
+            AVVideoCodecKey: (codec == 0) ? AVVideoCodecTypeH264 : AVVideoCodecTypeHEVC,
+            AVVideoWidthKey: @(outW),
+            AVVideoHeightKey: @(outH),
+            AVVideoCompressionPropertiesKey: @{
+                AVVideoAverageBitRateKey: @(bitrate),
+                AVVideoMaxKeyFrameIntervalKey: @((int)(fps * 2)),
+                AVVideoProfileLevelKey: (codec == 0) ? AVVideoProfileLevelH264HighAutoLevel
+                                                       : @"HEVC_Main10_AutoLevel",
+                AVVideoAllowFrameReorderingKey: @NO,
+                AVVideoExpectedSourceFrameRateKey: @((int)fps),
+            },
+        };
+        AVAssetWriterInput* videoInput = [[AVAssetWriterInput alloc]
+            initWithMediaType:AVMediaTypeVideo outputSettings:vidSettings];
+        videoInput.expectsMediaDataInRealTime = NO;
 
-        if (ctx.progressFn)
-            ctx.progressFn(clipIdx, totalClips, (int)fi, (int)frameCount, ctx.progressCtx);
+        AVAssetWriterInputPixelBufferAdaptor* adaptor = [[AVAssetWriterInputPixelBufferAdaptor alloc]
+            initWithAssetWriterInput:videoInput
+            sourcePixelBufferAttributes:@{
+                (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+                (id)kCVPixelBufferWidthKey: @(srcW),
+                (id)kCVPixelBufferHeightKey: @(srcH),
+            }];
+        [writer addInput:videoInput];
+
+        // Audio — LinearPCM 24-bit signed integer
+        uint32_t audioRate = 0, audioChannels = 0;
+        uint64_t audioSamples = 0;
+        float* audioData = braw_clip_extract_audio(clip, &audioRate, &audioChannels, &audioSamples);
+        AVAssetWriterInput* audioInput = nil;
+        if (audioData && audioRate > 0 && audioSamples > 0) {
+            NSDictionary* audioSettings = @{
+                AVFormatIDKey: @(kAudioFormatLinearPCM),
+                AVSampleRateKey: @(audioRate),
+                AVNumberOfChannelsKey: @(audioChannels),
+                AVLinearPCMBitDepthKey: @(24),
+                AVLinearPCMIsFloatKey: @NO,
+                AVLinearPCMIsNonInterleaved: @NO,
+                AVLinearPCMIsBigEndianKey: @NO,
+            };
+            audioInput = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeAudio
+                                                        outputSettings:audioSettings];
+            audioInput.expectsMediaDataInRealTime = NO;
+            [writer addInput:audioInput];
+        }
+
+        [writer startWriting];
+        [writer startSessionAtSourceTime:kCMTimeZero];
+
+        __block bool videoDone = false;
+        __block bool audioDone = (audioInput == nil);
+        __block bool inputFinished = false;
+        __block uint64_t frameIdx = 0;
+
+        [videoInput requestMediaDataWhenReadyOnQueue:dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0)
+                                          usingBlock:^{
+            @autoreleasepool {
+                bool origPreviewLUT = braw_clip_get_preview_lut(clip);
+                braw_clip_set_preview_lut(clip, false);
+
+                // Single-threaded GPU decode — fastest and most reliable path
+                while (frameIdx < frameCount && !g_cancel && !inputFinished) {
+                    // Check readiness AFTER decode (encoder may have filled during decode)
+                    int fw = 0, fh = 0;
+                    void* mtlBuf = braw_clip_decode_frame_gpu(clip, frameIdx, &fw, &fh);
+                    if (!mtlBuf) { frameIdx++; continue; }
+
+                    // Re-check readiness before append (decoder took time)
+                    if (!videoInput.readyForMoreMediaData) {
+                        // Not ready — free buffer and break; block will be called again
+                        braw_clip_free_frame_gpu(mtlBuf);
+                        break;
+                    }
+
+                    CVPixelBufferRef pxBuf = NULL;
+                    if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pxPool, &pxBuf) == kCVReturnSuccess) {
+                        CVPixelBufferLockBaseAddress(pxBuf, 0);
+                        uint8_t* dst = (uint8_t*)CVPixelBufferGetBaseAddress(pxBuf);
+                        size_t dstBPR = CVPixelBufferGetBytesPerRow(pxBuf);
+                        uint8_t* src = (uint8_t*)[(__bridge id<MTLBuffer>)mtlBuf contents];
+                        for (int y = 0; y < fh; y++)
+                            memcpy(dst + y * dstBPR, src + y * fw * 4, fw * 4);
+                        CVPixelBufferUnlockBaseAddress(pxBuf, 0);
+                        CMTime pts = CMTimeMake((int64_t)frameIdx, (int32_t)fps);
+                        @try {
+                            [adaptor appendPixelBuffer:pxBuf withPresentationTime:pts];
+                        } @catch (NSException* e) {
+                            fprintf(stderr, "appendPixelBuffer exception at frame %lld: %s\n",
+                                    (long long)frameIdx, [[e description] UTF8String]);
+                            CVPixelBufferRelease(pxBuf);
+                            braw_clip_free_frame_gpu(mtlBuf);
+                            // Don't set frameIdx = frameCount — just break. AVFoundation
+                            // will call this block again when ready for more data.
+                            break;
+                        }
+                        CVPixelBufferRelease(pxBuf);
+                    }
+                    braw_clip_free_frame_gpu(mtlBuf);
+                    if (pf) pf(ci, tc, (int)frameIdx, (int)frameCount, pctx);
+                    frameIdx++;
+                }
+                braw_clip_set_preview_lut(clip, origPreviewLUT);
+                if (frameIdx >= frameCount || g_cancel) {
+                    if (!inputFinished) {
+                        [videoInput markAsFinished];
+                        inputFinished = true;
+                    }
+                    videoDone = true;
+                }
+            }
+        }];
+
+        // Audio — float to s24le conversion
+        if (audioInput && audioData) {
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                @autoreleasepool {
+                    AudioStreamBasicDescription asbd = {};
+                    asbd.mSampleRate = audioRate;
+                    asbd.mFormatID = kAudioFormatLinearPCM;
+                    asbd.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+                    asbd.mBitsPerChannel = 24;
+                    asbd.mChannelsPerFrame = audioChannels;
+                    asbd.mBytesPerFrame = 3 * audioChannels;
+                    asbd.mBytesPerPacket = 3 * audioChannels;
+                    asbd.mFramesPerPacket = 1;
+
+                    CMFormatDescriptionRef audioFmtDesc = NULL;
+                    CMAudioFormatDescriptionCreate(kCFAllocatorDefault, &asbd, 0, NULL, 0, NULL, NULL, &audioFmtDesc);
+
+                    if (audioFmtDesc) {
+                        uint64_t samplesPerChunk = audioRate / (int)fps;
+                        if (samplesPerChunk == 0) samplesPerChunk = 1024;
+
+                        for (uint64_t pos = 0; pos < audioSamples && !g_cancel; pos += samplesPerChunk) {
+                            if (!audioInput.readyForMoreMediaData) { usleep(1000); continue; }
+                            uint64_t chunk = std::min(samplesPerChunk, audioSamples - pos);
+                            uint64_t numSamples = chunk * audioChannels;
+                            uint64_t byteCount = numSamples * 3;
+
+                            CMBlockBufferRef blockBuf = NULL;
+                            CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL,
+                                byteCount, NULL, NULL, 0, byteCount,
+                                kCMBlockBufferAssureMemoryNowFlag, &blockBuf);
+                            if (blockBuf) {
+                                char* dst = NULL;
+                                CMBlockBufferGetDataPointer(blockBuf, 0, NULL, NULL, &dst);
+                                if (dst) {
+                                    for (uint64_t s = 0; s < numSamples; s++) {
+                                        float f = audioData[pos * audioChannels + s];
+                                        if (f > 1.0f) f = 1.0f;
+                                        if (f < -1.0f) f = -1.0f;
+                                        int32_t sample = (int32_t)(f * 8388607.0f);
+                                        dst[s * 3 + 0] = (sample >> 0) & 0xff;
+                                        dst[s * 3 + 1] = (sample >> 8) & 0xff;
+                                        dst[s * 3 + 2] = (sample >> 16) & 0xff;
+                                    }
+                                }
+                                CMSampleBufferRef sbuf = NULL;
+                                CMTime audioPts = CMTimeMake((int64_t)pos, (int32_t)audioRate);
+                                CMAudioSampleBufferCreateWithPacketDescriptions(kCFAllocatorDefault,
+                                    blockBuf, true, NULL, NULL, audioFmtDesc,
+                                    (CMItemCount)chunk, audioPts, NULL, &sbuf);
+                                if (sbuf) { [audioInput appendSampleBuffer:sbuf]; CFRelease(sbuf); }
+                                CFRelease(blockBuf);
+                            }
+                        }
+                        CFRelease(audioFmtDesc);
+                    }
+                    free(audioData);
+                    [audioInput markAsFinished];
+                    audioDone = true;
+                }
+            });
+        } else {
+            if (audioData) free(audioData);
+            audioDone = true;
+        }
+
+        while (!videoDone || !audioDone) {
+            if (g_cancel) { [writer cancelWriting]; break; }
+            usleep(50000);
+        }
+
+        if (!g_cancel) {
+            [writer finishWritingWithCompletionHandler:^{}];
+            while (writer.status == AVAssetWriterStatusWriting) usleep(50000);
+        }
+
+        if (pxPool) CVPixelBufferPoolRelease(pxPool);
+        return writer.status == AVAssetWriterStatusCompleted;
+    }
+}
+
+extern "C" {
+
+static NSString* helperPath(void) {
+    NSString* bundlePath = [[NSBundle mainBundle] bundlePath];
+    NSString* bp = [bundlePath stringByDeletingLastPathComponent];
+    NSString* s = [bp stringByAppendingPathComponent:@"export_helper"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:s]) return s;
+    NSString* ep = [[NSBundle mainBundle] executablePath];
+    if (ep) {
+        s = [[ep stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"export_helper"];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:s]) return s;
+    }
+    s = [[[NSFileManager defaultManager] currentDirectoryPath] stringByAppendingPathComponent:@"build/export_helper"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:s]) return s;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"export_helper"]) return @"export_helper";
+    return nil;
+}
+
+int braw_export_start_inprocess(BrawProjectHandle* proj, const int* indices, int count,
+                                 int codec, int proResProfile, int resolutionMode, int dataRateMbps,
+                                 const char* outputDir, ExportProgressFn pf, void* ctx) {
+    if (g_running || !proj || !indices || count<=0) return -1;
+    auto* clip = braw_project_get_clip(proj, indices[0]);
+    if (!clip) return -1;
+    uint32_t sw=braw_clip_get_width(clip), sh=braw_clip_get_height(clip);
+    float fps=braw_clip_get_frame_rate(clip);
+    uint64_t fc=braw_clip_get_frame_count(clip);
+    int ow=sw, oh=sh;
+    int hs[]={0,2160,2160,1080,1080};
+    if (resolutionMode>0 && resolutionMode<5 && hs[resolutionMode]>0)
+        { oh=hs[resolutionMode]; ow=(int)((float)oh*sw/sh); ow=(ow+1)&~1; }
+
+    std::string cp = braw_clip_get_filepath(clip);
+    std::string cd = "/tmp";
+    size_t ls = cp.rfind('/');
+    if (ls != std::string::npos) cd = cp.substr(0, ls);
+    const char* od = (outputDir && outputDir[0]) ? outputDir : cd.c_str();
+    std::string ods = od;
+    std::string outPath;
+    if (ods.size()>4 && ods.substr(ods.size()-4)==".mov") outPath = ods;
+    else {
+        std::string nm = braw_clip_get_filename(clip);
+        size_t d = nm.rfind('.');
+        if (d != std::string::npos) nm = nm.substr(0, d);
+        outPath = ods + "/" + nm + "_export.mov";
     }
 
-    VTCompressionSessionCompleteFrames(session, kCMTimeInvalid);
-    VTCompressionSessionInvalidate(session);
-    CFRelease(session);
-    return true;
+    g_running=true; g_cancel=false;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
+        for (int ci=0; ci<count && !g_cancel; ci++) {
+            auto* c = braw_project_get_clip(proj, indices[ci]);
+            if (!c) continue;
+            exportMOV(c, ow, oh, fps, fc, codec, dataRateMbps*1000000, outPath, pf, ctx, ci, count);
+        }
+        g_running=false;
+        if (pf) pf(0,0,-1,-1,ctx);
+    });
+    return 0;
 }
 
 int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                        int codec, int proResProfile, int resolutionMode, int dataRateMbps,
-                       const char* outputDir,
-                       ExportProgressFn progressFn, void* ctx) {
-    if (g_exportRunning) return -1;
-    if (!proj || !indices || count <= 0) return -1;
-    if (!g_exportQueue)
-        g_exportQueue = dispatch_queue_create("com.braw.export", DISPATCH_QUEUE_SERIAL);
+                       const char* outputDir, ExportProgressFn pf, void* ctx) {
+    if (g_running || !proj || !indices || count<=0) return -1;
+    NSString* helper = helperPath();
+    if (!helper) { fprintf(stderr, "export_helper binary not found\n"); return -1; }
 
-    ExportContext* ec = new ExportContext();
-    ec->project = proj;
-    ec->indices.assign(indices, indices + count);
-    ec->codec = codec;
-    ec->proResProfile = proResProfile;
-    ec->resolutionMode = resolutionMode;
-    ec->dataRateMbps = dataRateMbps;
-    ec->outputDir = outputDir ? outputDir : "";
-    ec->progressFn = progressFn;
-    ec->progressCtx = ctx;
+    // Copy indices to local storage — the Swift caller's array may be deallocated
+    // by the time the async block runs. We can't capture the raw pointer.
+    std::vector<int> indicesCopy(indices, indices + count);
 
-    g_exportRunning = true;
-    g_exportCancel = false;
-    dispatch_async(g_exportQueue, ^{
+    g_running=true; g_cancel=false;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         @autoreleasepool {
-            for (int i = 0; i < (int)ec->indices.size(); i++) {
-                if (g_exportCancel) break;
-                BrawClipHandle* clip = braw_project_get_clip(ec->project, ec->indices[i]);
-                if (clip) ExportClip(clip, *ec, i, (int)ec->indices.size());
+            const auto& idxVec = indicesCopy;
+            for (int i=0; i<(int)idxVec.size() && !g_cancel; i++) {
+                int projectIdx = idxVec[i];
+                auto* clip = braw_project_get_clip(proj, projectIdx);
+                if (!clip) { fprintf(stderr, "clip null at project index %d\n", projectIdx); continue; }
+
+                char fpBuf[1024];
+                snprintf(fpBuf, sizeof(fpBuf), "%s", braw_clip_get_filepath(clip));
+
+                NSString* nb = [NSString stringWithUTF8String:fpBuf];
+                if (!nb) { fprintf(stderr, "Skipping project index %d: invalid UTF-8\n", projectIdx); continue; }
+
+                char fnBuf[256];
+                const char* lastSlash = strrchr(fpBuf, '/');
+                snprintf(fnBuf, sizeof(fnBuf), "%s", lastSlash ? lastSlash + 1 : fpBuf);
+                NSString* bn = [[NSString stringWithUTF8String:fnBuf] stringByDeletingPathExtension];
+                if (!bn) { fprintf(stderr, "Skipping project index %d: bad filename\n", projectIdx); continue; }
+
+                // Always use source file's directory for output (ignore Swift's outputDir
+                // which may be corrupted by dangling C string pointers)
+                NSString* outDir = [[NSString stringWithUTF8String:fpBuf] stringByDeletingLastPathComponent];
+                NSString* outPath = [outDir stringByAppendingPathComponent:[bn stringByAppendingString:@"_export.mov"]];
+                if (!outPath) { fprintf(stderr, "Skipping project index %d: path construction failed\n", projectIdx); continue; }
+
+                NSTask* task = [[NSTask alloc] init];
+                task.executableURL = [NSURL fileURLWithPath:helper];
+                task.arguments = @[nb, outPath,
+                    [NSString stringWithFormat:@"%d", codec],
+                    [NSString stringWithFormat:@"%d", proResProfile],
+                    [NSString stringWithFormat:@"%d", resolutionMode],
+                    [NSString stringWithFormat:@"%d", dataRateMbps]];
+                NSPipe* op = [NSPipe pipe];
+                NSPipe* ep = [NSPipe pipe];
+                task.standardOutput = op;
+                task.standardError = ep;
+                NSFileHandle* rh = [op fileHandleForReading];
+                NSFileHandle* eh = [(NSPipe*)task.standardError fileHandleForReading];
+
+                NSError* err = nil;
+                [task launchAndReturnError:&err];
+                if (err) { fprintf(stderr, "Launch failed: %s\n", [[err description] UTF8String]); continue; }
+
+                uint64_t totalFrames = braw_clip_get_frame_count(clip);
+                NSMutableData* buf = [[NSMutableData alloc] init];
+                while ([task isRunning] && !g_cancel) {
+                    NSData* chunk = [rh availableData];
+                    if (chunk.length == 0) break;
+                    [buf appendData:chunk];
+                    NSString* text = [[NSString alloc] initWithData:buf encoding:NSUTF8StringEncoding];
+                    for (NSString* line in [text componentsSeparatedByString:@"\n"]) {
+                        if ([line hasPrefix:@"PROGRESS"]) {
+                            int fi = 0;
+                            sscanf([line UTF8String], "PROGRESS %d", &fi);
+                            if (pf) pf(i, count, fi, (int)totalFrames, ctx);
+                        }
+                    }
+                    NSString* last = [[text componentsSeparatedByString:@"\n"] lastObject];
+                    buf = (last.length > 0)
+                        ? [[last dataUsingEncoding:NSUTF8StringEncoding] mutableCopy]
+                        : [[NSMutableData alloc] init];
+                }
+                if (g_cancel && [task isRunning]) [task terminate];
+                [task waitUntilExit];
+                NSData* ed = [eh readDataToEndOfFile];
+                if (ed.length > 0) fprintf(stderr, "helper: %s\n", [[[NSString alloc] initWithData:ed encoding:NSUTF8StringEncoding] UTF8String]);
+                if ([task terminationStatus] == 0)
+                    fprintf(stderr, "Export OK: %s\n", [outPath UTF8String]);
+                else
+                    fprintf(stderr, "Export FAILED: %s\n", [outPath UTF8String]);
             }
-            g_exportRunning = false;
-            if (ec->progressFn) ec->progressFn(0, 0, -1, -1, ec->progressCtx);
-            delete ec;
+            g_running=false;
+            if (pf) pf(count-1, count, -1, -1, ctx);
         }
     });
     return 0;
 }
 
-void braw_export_cancel(void) { g_exportCancel = true; }
-int  braw_export_is_running(void) { return g_exportRunning ? 1 : 0; }
+void braw_export_cancel(void) { g_cancel=true; }
+int  braw_export_is_running(void) { return g_running?1:0; }
+
+} // extern "C"

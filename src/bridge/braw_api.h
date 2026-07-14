@@ -12,6 +12,8 @@ typedef struct BrawProjectHandle BrawProjectHandle;
 // ── Clip API ──────────────────────────────────────
 BrawClipHandle* braw_clip_open(const char* path);
 void            braw_clip_close(BrawClipHandle* h);
+void            braw_clip_ensure_decoder(BrawClipHandle* h);  // lazy-create decoder
+void            braw_clip_release_decoder(BrawClipHandle* h); // free decoder memory
 void            braw_clip_capture_native(BrawClipHandle* h);
 const char*     braw_clip_get_filename(BrawClipHandle* h);
 const char*     braw_clip_get_filepath(BrawClipHandle* h);
@@ -46,6 +48,17 @@ uint8_t* braw_clip_decode_frame(BrawClipHandle* h, uint64_t index, int* w, int* 
 uint8_t* braw_clip_decode_frame_scaled(BrawClipHandle* h, uint64_t index, int* w, int* outH, float scale);
 void     braw_clip_free_frame(uint8_t* data);
 
+// GPU decode: returns retained MTLBuffer (caller must call braw_clip_free_frame_gpu)
+void*    braw_clip_decode_frame_gpu(BrawClipHandle* h, uint64_t index, int* w, int* outH);
+// GPU decode at reduced scale: returns retained MTLBuffer (caller must call braw_clip_free_frame_gpu)
+void*    braw_clip_decode_frame_gpu_scaled(BrawClipHandle* h, uint64_t index, int* w, int* outH, float scale);
+// Free a GPU frame buffer returned by braw_clip_decode_frame_gpu / _scaled
+void     braw_clip_free_frame_gpu(void* buf);
+
+// Audio extraction: returns PCM float samples (caller frees with free())
+float*   braw_clip_extract_audio(BrawClipHandle* h, uint32_t* sampleRate,
+                                  uint32_t* channels, uint64_t* sampleCount);
+
 // ── Project API ──────────────────────────────────
 BrawProjectHandle* braw_project_create(void);
 void               braw_project_destroy(BrawProjectHandle* h);
@@ -64,6 +77,10 @@ int  braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                         int codec, int proResProfile, int resolutionMode, int dataRateMbps,
                         const char* outputDir,
                         ExportProgressFn progressFn, void* ctx);
+int  braw_export_start_inprocess(BrawProjectHandle* proj, const int* indices, int count,
+                                  int codec, int proResProfile, int resolutionMode, int dataRateMbps,
+                                  const char* outputDir,
+                                  ExportProgressFn progressFn, void* ctx);
 void braw_export_cancel(void);
 int  braw_export_is_running(void);
 
