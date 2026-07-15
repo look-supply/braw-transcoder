@@ -510,61 +510,46 @@ uint16_t BrawDecoder::GetColorScienceGen() const {
 
 float* BrawDecoder::ExtractAudio(uint32_t* outSampleRate, uint32_t* outChannels,
                                    uint64_t* outSampleCount) {
-    // BRAW SDK's GetAudioSamples returns garbage for many clips.
-    // Use ffmpeg to extract audio from the source file instead.
+    // BRAW SDK's GetAudioSamples returns garbage on this SDK version.
+    // Use ffmpeg to extract audio from the source file.
     *outSampleRate = 0; *outChannels = 0; *outSampleCount = 0;
-    if (!m_impl->clip) return nullptr;
+    if (!m_impl->clip || m_impl->filePath.empty()) return nullptr;
 
-    // Get sample rate and channels from BRAW SDK metadata
+    // Get format metadata from SDK
     IBlackmagicRawClipAudio* audio = nullptr;
-    HRESULT hr = m_impl->clip->QueryInterface(IID_IBlackmagicRawClipAudio, (void**)&audio);
-    if (FAILED(hr) || !audio) return nullptr;
-    audio->GetAudioSampleRate(outSampleRate);
-    audio->GetAudioChannelCount(outChannels);
-    uint64_t totalFrames = 0;
-    audio->GetAudioSampleCount(&totalFrames);
-    audio->Release();
-    if (*outSampleRate == 0 || *outChannels == 0 || totalFrames == 0) return nullptr;
-
-    // Find ffmpeg binary
-    const char* ffmpegPaths[] = {
-        "/opt/homebrew/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/usr/bin/ffmpeg",
-    };
-    const char* ffmpeg = nullptr;
-    for (int i = 0; i < 3; i++) {
-        if (access(ffmpegPaths[i], X_OK) == 0) { ffmpeg = ffmpegPaths[i]; break; }
+    if (SUCCEEDED(m_impl->clip->QueryInterface(IID_IBlackmagicRawClipAudio, (void**)&audio)) && audio) {
+        audio->GetAudioSampleRate(outSampleRate);
+        audio->GetAudioChannelCount(outChannels);
+        audio->Release();
     }
+    if (*outSampleRate == 0) *outSampleRate = 48000;
+    if (*outChannels == 0) *outChannels = 2;
+
+    // Find ffmpeg
+    const char* ffmpeg = nullptr;
+    const char* paths[] = {"/opt/homebrew/bin/ffmpeg","/usr/local/bin/ffmpeg","/usr/bin/ffmpeg"};
+    for (int i = 0; i < 3; i++) { if (access(paths[i], X_OK) == 0) { ffmpeg = paths[i]; break; } }
     if (!ffmpeg) return nullptr;
 
-    // Use temp file for audio extraction (avoids shell quoting issues with spaces)
-    char tmpPath[512];
-    snprintf(tmpPath, sizeof(tmpPath), "/tmp/braw_audio_%d_%d.raw", getpid(), rand());
+    // Extract audio to temp file
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp), "/tmp/braw_audio_%d_%d.raw", getpid(), rand());
     char cmd[4096];
     snprintf(cmd, sizeof(cmd), "%s -y -i \"%s\" -vn -c:a pcm_f32le -f f32le \"%s\" 2>/dev/null",
-             ffmpeg, m_impl->filePath.c_str(), tmpPath);
-    int rc = system(cmd);
-    if (rc != 0) { return nullptr; }
+             ffmpeg, m_impl->filePath.c_str(), tmp);
+    if (system(cmd) != 0) return nullptr;
 
-    // Read the temp file
-    FILE* fp = fopen(tmpPath, "rb");
-    if (!fp) { return nullptr; }
-    fseek(fp, 0, SEEK_END);
-    long fileLen = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    if (fileLen <= 0) { fclose(fp); unlink(tmpPath); return nullptr; }
+    FILE* fp = fopen(tmp, "rb");
+    if (!fp) return nullptr;
+    fseek(fp, 0, SEEK_END); long flen = ftell(fp); fseek(fp, 0, SEEK_SET);
+    if (flen <= 0) { fclose(fp); unlink(tmp); return nullptr; }
 
-    float* samples = (float*)malloc((size_t)fileLen);
-    if (!samples) { fclose(fp); unlink(tmpPath); return nullptr; }
-    size_t got = fread(samples, 1, (size_t)fileLen, fp);
-    fclose(fp);
-    unlink(tmpPath);
+    float* samples = (float*)malloc((size_t)flen);
+    size_t got = samples ? fread(samples, 1, (size_t)flen, fp) : 0;
+    fclose(fp); unlink(tmp);
+    if (!samples || got == 0) { free(samples); return nullptr; }
 
     uint64_t totalFloats = got / sizeof(float);
     *outSampleCount = totalFloats / *outChannels;
-    fprintf(stderr, "AUDIO: ffmpeg extracted %llu floats, %u ch, %u Hz, %llu samples\n",
-            (unsigned long long)totalFloats, *outChannels, *outSampleRate,
-            (unsigned long long)*outSampleCount);
     return samples;
 }
