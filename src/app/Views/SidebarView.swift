@@ -58,7 +58,11 @@ struct SidebarView: View {
                                     }
                                     
                                     Button("Paste Settings") {
-                                        project.pasteSettings(to: index)
+                                        if selectedIndices.contains(index) {
+                                            pasteToSelectedClips()
+                                        } else {
+                                            project.pasteSettings(to: index)
+                                        }
                                     }
                                     
                                     Divider()
@@ -75,28 +79,16 @@ struct SidebarView: View {
                 }
             }
             .background(
-                Button("") {
-                    deleteSelectedClips()
+                Group {
+                    Button("") { deleteSelectedClips() }
+                        .keyboardShortcut(.delete, modifiers: [])
+                    Button("") { copyActiveClipSettings() }
+                        .keyboardShortcut("c", modifiers: .command)
+                    Button("") { pasteToSelectedClips() }
+                        .keyboardShortcut("v", modifiers: .command)
                 }
-                .keyboardShortcut(.delete, modifiers: [])
                 .opacity(0)
-                .frame(width: 0, height: 0)
-            )
-            .background(
-                Button("") {
-                    copyActiveClipSettings()
-                }
-                .keyboardShortcut("c", modifiers: .command)
-                .opacity(0)
-                .frame(width: 0, height: 0)
-            )
-            .background(
-                Button("") {
-                    pasteToSelectedClips()
-                }
-                .keyboardShortcut("v", modifiers: .command)
-                .opacity(0)
-                .frame(width: 0, height: 0)
+                .frame(width: 1, height: 1)
             )
         }
     }

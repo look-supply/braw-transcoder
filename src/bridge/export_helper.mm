@@ -2,7 +2,7 @@
 // Spawned by braw_export_start for each clip. All SDK memory
 // is reclaimed by the OS when this process exits.
 // CPU decode path doesn't leak (no GPU/Metal pipeline).
-// Usage: export_helper <braw_path> <output_path> <codec> <profile> <res> <bitrate>
+// Usage: export_helper <braw_path> <output_path> <codec> <profile> <res> <bitrate> [iso] [colorTemp] [tint] [exposure] [highlightRecovery] [bakeLUT]
 
 #include "bridge/braw_api.h"
 #include <cstdio>
@@ -33,6 +33,16 @@ int main(int argc, char** argv) {
         return 1;
     }
     fprintf(stderr, "HELPER: import OK idx=%d\n", imp);
+
+    BrawClipHandle* clip = braw_project_get_clip(proj, 0);
+    if (clip) {
+        if (argc > 7) braw_clip_set_iso(clip, (uint32_t)atoi(argv[7]));
+        if (argc > 8) braw_clip_set_color_temp(clip, (uint32_t)atoi(argv[8]));
+        if (argc > 9) braw_clip_set_tint(clip, (int16_t)atoi(argv[9]));
+        if (argc > 10) braw_clip_set_exposure(clip, (float)atof(argv[10]));
+        if (argc > 11) braw_clip_set_highlight_recovery(clip, atoi(argv[11]) != 0);
+        if (argc > 12) braw_clip_set_bake_lut(clip, atoi(argv[12]) != 0);
+    }
 
     int indices[] = {0};
     int ret = braw_export_start_inprocess(proj, indices, 1,

@@ -427,13 +427,26 @@ int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                 NSString* outPath = [outDir stringByAppendingPathComponent:[bn stringByAppendingString:@"_export.mov"]];
                 if (!outPath) { fprintf(stderr, "Skipping project index %d: path construction failed\n", projectIdx); continue; }
 
+                uint32_t adjIso = braw_clip_get_iso(clip);
+                uint32_t adjCt  = braw_clip_get_color_temp(clip);
+                int16_t  adjTint = braw_clip_get_tint(clip);
+                float    adjExp  = braw_clip_get_exposure(clip);
+                bool     adjHl   = braw_clip_get_highlight_recovery(clip);
+                bool     adjBl   = braw_clip_get_bake_lut(clip);
+
                 NSTask* task = [[NSTask alloc] init];
                 task.executableURL = [NSURL fileURLWithPath:helper];
                 task.arguments = @[nb, outPath,
                     [NSString stringWithFormat:@"%d", codec],
                     [NSString stringWithFormat:@"%d", proResProfile],
                     [NSString stringWithFormat:@"%d", resolutionMode],
-                    [NSString stringWithFormat:@"%d", dataRateMbps]];
+                    [NSString stringWithFormat:@"%d", dataRateMbps],
+                    [NSString stringWithFormat:@"%u", adjIso],
+                    [NSString stringWithFormat:@"%u", adjCt],
+                    [NSString stringWithFormat:@"%d", adjTint],
+                    [NSString stringWithFormat:@"%f", adjExp],
+                    [NSString stringWithFormat:@"%d", adjHl ? 1 : 0],
+                    [NSString stringWithFormat:@"%d", adjBl ? 1 : 0]];
                 NSPipe* op = [NSPipe pipe];
                 NSPipe* ep = [NSPipe pipe];
                 task.standardOutput = op;
