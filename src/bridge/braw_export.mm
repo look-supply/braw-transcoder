@@ -291,18 +291,22 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
 extern "C" {
 
 static NSString* helperPath(void) {
-    NSString* bundlePath = [[NSBundle mainBundle] bundlePath];
-    NSString* bp = [bundlePath stringByDeletingLastPathComponent];
-    NSString* s = [bp stringByAppendingPathComponent:@"export_helper"];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:s]) return s;
+    // 1. Inside app bundle next to main executable (production + `build.sh`)
     NSString* ep = [[NSBundle mainBundle] executablePath];
     if (ep) {
-        s = [[ep stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"export_helper"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:s]) return s;
+        NSString* s = [[ep stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"export_helper"];
+        if ([[NSFileManager defaultManager] isExecutableFileAtPath:s]) return s;
     }
-    s = [[[NSFileManager defaultManager] currentDirectoryPath] stringByAppendingPathComponent:@"build/export_helper"];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:s]) return s;
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"export_helper"]) return @"export_helper";
+    // 2. Bundle parent directory (legacy dev builds)
+    NSString* bundlePath = [[NSBundle mainBundle] bundlePath];
+    if (bundlePath) {
+        NSString* s = [[bundlePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"export_helper"];
+        if ([[NSFileManager defaultManager] isExecutableFileAtPath:s]) return s;
+    }
+    // 3. CWD build/export_helper (direct invocation)
+    NSString* s = [[[NSFileManager defaultManager] currentDirectoryPath] stringByAppendingPathComponent:@"build/export_helper"];
+    if ([[NSFileManager defaultManager] isExecutableFileAtPath:s]) return s;
+    if ([[NSFileManager defaultManager] isExecutableFileAtPath:@"export_helper"]) return @"export_helper";
     return nil;
 }
 
