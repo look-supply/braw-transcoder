@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct SidebarView: View {
     @ObservedObject var project: ProjectModel
     @State private var selectedIndices: Set<Int> = []
+    @State private var keyMonitor: Any?
     
     var body: some View {
         VStack(spacing: 0) {
@@ -80,8 +81,6 @@ struct SidebarView: View {
             }
             .background(
                 Group {
-                    Button("") { deleteSelectedClips() }
-                        .keyboardShortcut(.delete, modifiers: [])
                     Button("") { copyActiveClipSettings() }
                         .keyboardShortcut("c", modifiers: .command)
                     Button("") { pasteToSelectedClips() }
@@ -90,6 +89,20 @@ struct SidebarView: View {
                 .opacity(0)
                 .frame(width: 1, height: 1)
             )
+        }
+        .onAppear {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                if event.keyCode == 51 || event.keyCode == 117 {
+                    deleteSelectedClips()
+                    return nil
+                }
+                return event
+            }
+        }
+        .onDisappear {
+            if let monitor = keyMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
         }
     }
     
