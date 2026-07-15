@@ -29,16 +29,20 @@ static int checkFile(const char* path) {
     int is10bit = 0;
     if (fp) { char b[16]={}; fgets(b,sizeof(b),fp); is10bit = atoi(b); pclose(fp); }
     
-    // Check PCM audio
-    snprintf(cmd, sizeof(cmd), "ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 '%s' 2>/dev/null | grep -c 'pcm'", path);
+    // Check PCM s24le audio
+    snprintf(cmd, sizeof(cmd), "ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 '%s' 2>/dev/null", path);
     fp = popen(cmd, "r");
-    int hasPCM = 0;
-    if (fp) { char b[16]={}; fgets(b,sizeof(b),fp); hasPCM = atoi(b); pclose(fp); }
+    char codec[32] = {};
+    if (fp) { fgets(codec, sizeof(codec), fp); pclose(fp); }
+    // Remove trailing newline
+    char* nl = strchr(codec, '\n');
+    if (nl) *nl = '\0';
+    int hasPCM = (strcmp(codec, "pcm_s24le") == 0) ? 1 : 0;
     
-    printf("    %-55s %s  10bit=%s  pcm=%s  size=%ld\n",
+    printf("    %-55s %s  10bit=%s  audio=%-10s  size=%ld\n",
            path, size > 1024 ? "OK" : "EMPTY",
            is10bit ? "YES" : "NO",
-           hasPCM ? "YES" : "NO",
+           hasPCM ? codec : "NONE",
            size);
     return (size > 1024 && is10bit && hasPCM) ? 0 : 1;
 }

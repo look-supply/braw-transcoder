@@ -429,27 +429,45 @@ ffprobe -v error -show_entries stream=pix_fmt,profile <file.mov>
 
 ### Audio Configuration
 ```
-Codec:      LinearPCM (uncompressed, lossless)
-Bit depth:  32-bit float (matching BRAW SDK output)
+Codec:      pcm_s24le (24-bit signed little-endian PCM, via ffmpeg)
 Sample rate: original clip rate (typically 48000 Hz)
-Channels:   original clip channel count (typically 2 stereo)
-Interleave: packed (non-interleaved = NO)
-Endian:     little (native for Apple Silicon)
+Channels:   pruned to non-empty channels (min 2)
+Muxer:      ffmpeg subprocess (bundled or system install)
 ```
 
-Set in `exportMOV()`:
-```objc
-AVFormatIDKey:              @(kAudioFormatLinearPCM)
-AVLinearPCMBitDepthKey:     @(32)
-AVLinearPCMIsFloatKey:      @YES
-AVLinearPCMIsNonInterleaved:@NO
-AVLinearPCMIsBigEndianKey:  @NO
+### Architecture
+AVAssetWriter writes video-only MOV to a temp path. Audio is extracted 
+as raw f32le, written to a temp file, then ffmpeg muxes them:
+```
+ffmpeg -y -i video.mov -f f32le -ar <rate> -ac <ch> -i audio.raw 
+       -c:v copy -c:a pcm_s24le -movflags +faststart final.mov
+```
+
+### Why ffmpeg Instead of AVFoundation Audio
+- AVAssetWriter's 24-bit packed PCM in MOV produces static on macOS 
+  native players (known AVFoundation limitation).
+- 16-bit PCM works but reduces dynamic range.
+- ffmpeg's `pcm_s24le` encoder produces proper 24-bit PCM that macOS 
+  QuickTime Player and all native apps play correctly.
+
+### ffmpeg Bundling
+The app finds ffmpeg via `findFFmpeg()` which checks:
+1. App bundle `Resources/ffmpeg` (for bundled installs)
+2. App bundle `Frameworks/ffmpeg` (for bundled installs)
+3. `/opt/homebrew/bin/ffmpeg` (Homebrew ARM)
+4. `/usr/local/bin/ffmpeg` (Homebrew Intel / manual)
+5. `/usr/bin/ffmpeg` (system install)
+
+For distribution, copy the ffmpeg binary into the app bundle:
+```bash
+cp /opt/homebrew/bin/ffmpeg BrawTranscoder.app/Contents/Resources/ffmpeg
 ```
 
 ### Why Not AAC
 - AAC is lossy — discarded detail that DaVinci Resolve workflows need.
 - PCM at original sample rate means re-wraps/conforms are lossless.
-- File size for audio is small relative to video (at 48kHz/32-bit stereo = ~3.1 Mbps vs video at ~200 Mbps).
+- File size for audio is small relative to video (at 48kHz/24-bit stereo 
+  = ~2.3 Mbps vs video at ~200 Mbps).
 
 ### Verify Audio Format
 ```bash
