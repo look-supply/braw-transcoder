@@ -149,17 +149,17 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
             }];
         [writer addInput:videoInput];
 
-        // Audio input — 16-bit PCM (always works with AVFoundation, no static)
+        // Audio input — 24-bit big-endian PCM (pcm_s24be, matches reference MOV)
         AVAssetWriterInput* audioInput = nil;
         if (audioData && audioRate > 0 && audioSamples > 0) {
             NSDictionary* audioSettings = @{
                 AVFormatIDKey: @(kAudioFormatLinearPCM),
                 AVSampleRateKey: @(audioRate),
                 AVNumberOfChannelsKey: @(audioChannels),
-                AVLinearPCMBitDepthKey: @(16),
+                AVLinearPCMBitDepthKey: @(24),
                 AVLinearPCMIsFloatKey: @NO,
                 AVLinearPCMIsNonInterleaved: @NO,
-                AVLinearPCMIsBigEndianKey: @NO,
+                AVLinearPCMIsBigEndianKey: @YES,
             };
             audioInput = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeAudio
                                                         outputSettings:audioSettings];
@@ -227,18 +227,18 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
             }
         }];
 
-        // Audio — float to s16le, async
+        // Audio — float to s24be (24-bit big-endian PCM)
         if (audioInput && audioData) {
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
                 @autoreleasepool {
                     AudioStreamBasicDescription asbd = {};
                     asbd.mSampleRate = audioRate;
                     asbd.mFormatID = kAudioFormatLinearPCM;
-                    asbd.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
-                    asbd.mBitsPerChannel = 16;
+                    asbd.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked | kAudioFormatFlagIsBigEndian;
+                    asbd.mBitsPerChannel = 24;
                     asbd.mChannelsPerFrame = audioChannels;
-                    asbd.mBytesPerFrame = 2 * audioChannels;
-                    asbd.mBytesPerPacket = 2 * audioChannels;
+                    asbd.mBytesPerFrame = 3 * audioChannels;
+                    asbd.mBytesPerPacket = 3 * audioChannels;
                     asbd.mFramesPerPacket = 1;
 
                     CMFormatDescriptionRef audioFmtDesc = NULL;
@@ -252,7 +252,7 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                             if (!audioInput.readyForMoreMediaData) { usleep(1000); continue; }
                             uint64_t chunk = std::min(samplesPerChunk, audioSamples - pos);
                             uint64_t numFloats = chunk * audioChannels;
-                            uint64_t byteCount = numFloats * 2;
+                            uint64_t byteCount = numFloats * 3;
 
                             CMBlockBufferRef blockBuf = NULL;
                             CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL,
@@ -266,9 +266,11 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                                         float f = audioData[pos * audioChannels + s];
                                         if (f > 1.0f) f = 1.0f;
                                         if (f < -1.0f) f = -1.0f;
-                                        int16_t sample = (int16_t)(f * 32767.0f);
-                                        dst[s * 2 + 0] = (uint8_t)(sample >> 0);
-                                        dst[s * 2 + 1] = (uint8_t)(sample >> 8);
+                                        int32_t sample = (int32_t)(f * 8388607.0f);
+                                        // Big-endian: high byte first
+                                        dst[s * 3 + 0] = (uint8_t)(sample >> 16);
+                                        dst[s * 3 + 1] = (uint8_t)(sample >> 8);
+                                        dst[s * 3 + 2] = (uint8_t)(sample >> 0);
                                     }
                                 }
                                 CMSampleBufferRef sbuf = NULL;

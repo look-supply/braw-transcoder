@@ -22,6 +22,7 @@ struct BrawDecoder::Impl {
     IBlackmagicRaw*        codec   = nullptr;
     IBlackmagicRawClip*    clip    = nullptr;
 
+    std::string filePath;
     uint32_t width  = 0;
     uint32_t height = 0;
     float frameRate = 0.0f;
@@ -254,6 +255,7 @@ BrawDecoder::~BrawDecoder() {
 
 bool BrawDecoder::OpenClip(const std::string& path) {
     Close();
+    m_impl->filePath = path;
 
     CFStringRef libPath = CFSTR("/Applications/Blackmagic RAW/Blackmagic RAW SDK/Mac/Libraries");
     m_impl->factory = CreateBlackmagicRawFactoryInstanceFromPath(libPath);
@@ -508,39 +510,61 @@ uint16_t BrawDecoder::GetColorScienceGen() const {
 
 float* BrawDecoder::ExtractAudio(uint32_t* outSampleRate, uint32_t* outChannels,
                                    uint64_t* outSampleCount) {
+    // BRAW SDK's GetAudioSamples returns garbage for many clips.
+    // Use ffmpeg to extract audio from the source file instead.
+    *outSampleRate = 0; *outChannels = 0; *outSampleCount = 0;
     if (!m_impl->clip) return nullptr;
 
+    // Get sample rate and channels from BRAW SDK metadata
     IBlackmagicRawClipAudio* audio = nullptr;
     HRESULT hr = m_impl->clip->QueryInterface(IID_IBlackmagicRawClipAudio, (void**)&audio);
     if (FAILED(hr) || !audio) return nullptr;
-
     audio->GetAudioSampleRate(outSampleRate);
     audio->GetAudioChannelCount(outChannels);
-    audio->GetAudioSampleCount(outSampleCount);
-
-    if (*outSampleCount == 0 || *outChannels == 0) {
-        audio->Release();
-        *outSampleRate = 0; *outChannels = 0; *outSampleCount = 0;
-        return nullptr;
-    }
-
-    uint64_t maxFloats = *outSampleCount * *outChannels;
-    float* samples = (float*)malloc(maxFloats * sizeof(float));
-    if (samples) {
-        uint32_t samplesRead = 0, bytesRead = 0;
-        audio->GetAudioSamples(0, samples,
-                                (uint32_t)(maxFloats * sizeof(float)),
-                                (uint32_t)maxFloats, &samplesRead, &bytesRead);
-        if (samplesRead > 0 && bytesRead > 0) {
-            uint64_t actualFloats = (uint64_t)bytesRead / sizeof(float);
-            if (actualFloats < maxFloats) {
-                maxFloats = actualFloats;
-                *outSampleCount = maxFloats / *outChannels;
-                float* trimmed = (float*)realloc(samples, maxFloats * sizeof(float));
-                if (trimmed) samples = trimmed;
-            }
-        }
-    }
+    uint64_t totalFrames = 0;
+    audio->GetAudioSampleCount(&totalFrames);
     audio->Release();
+    if (*outSampleRate == 0 || *outChannels == 0 || totalFrames == 0) return nullptr;
+
+    // Find ffmpeg binary
+    const char* ffmpegPaths[] = {
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    };
+    const char* ffmpeg = nullptr;
+    for (int i = 0; i < 3; i++) {
+        if (access(ffmpegPaths[i], X_OK) == 0) { ffmpeg = ffmpegPaths[i]; break; }
+    }
+    if (!ffmpeg) return nullptr;
+
+    // Use temp file for audio extraction (avoids shell quoting issues with spaces)
+    char tmpPath[512];
+    snprintf(tmpPath, sizeof(tmpPath), "/tmp/braw_audio_%d_%d.raw", getpid(), rand());
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd), "%s -y -i \"%s\" -vn -c:a pcm_f32le -f f32le \"%s\" 2>/dev/null",
+             ffmpeg, m_impl->filePath.c_str(), tmpPath);
+    int rc = system(cmd);
+    if (rc != 0) { return nullptr; }
+
+    // Read the temp file
+    FILE* fp = fopen(tmpPath, "rb");
+    if (!fp) { return nullptr; }
+    fseek(fp, 0, SEEK_END);
+    long fileLen = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (fileLen <= 0) { fclose(fp); unlink(tmpPath); return nullptr; }
+
+    float* samples = (float*)malloc((size_t)fileLen);
+    if (!samples) { fclose(fp); unlink(tmpPath); return nullptr; }
+    size_t got = fread(samples, 1, (size_t)fileLen, fp);
+    fclose(fp);
+    unlink(tmpPath);
+
+    uint64_t totalFloats = got / sizeof(float);
+    *outSampleCount = totalFloats / *outChannels;
+    fprintf(stderr, "AUDIO: ffmpeg extracted %llu floats, %u ch, %u Hz, %llu samples\n",
+            (unsigned long long)totalFloats, *outChannels, *outSampleRate,
+            (unsigned long long)*outSampleCount);
     return samples;
 }
