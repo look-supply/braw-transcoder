@@ -41,7 +41,6 @@ target_link_libraries(braw_core PRIVATE
     "-framework AudioToolbox"
     "-framework AVFoundation"
     "${BRAW_SDK_FRAMEWORK_DIR}/BlackmagicRawAPI.framework"
-    PkgConfig::FFMPEG
 )
 
 target_compile_options(braw_core PRIVATE

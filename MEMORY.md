@@ -452,15 +452,18 @@ ffmpeg -y -i video.mov -f f32le -ar <rate> -ac <ch> -i audio.raw
 
 ### ffmpeg Bundling
 The app finds ffmpeg via `findFFmpeg()` which checks:
-1. App bundle `Resources/ffmpeg` (for bundled installs)
-2. App bundle `Frameworks/ffmpeg` (for bundled installs)
+1. `Contents/MacOS/ffmpeg` (next to main executable, bundled by build.sh)
+2. App bundle `Resources/ffmpeg` (legacy)
 3. `/opt/homebrew/bin/ffmpeg` (Homebrew ARM)
 4. `/usr/local/bin/ffmpeg` (Homebrew Intel / manual)
 5. `/usr/bin/ffmpeg` (system install)
 
+ffmpeg must be in `Contents/MacOS/` not `Contents/Resources/` — macOS
+blocks execution of binaries inside Resources for .app bundles.
+
 For distribution, copy the ffmpeg binary into the app bundle:
 ```bash
-cp /opt/homebrew/bin/ffmpeg BrawTranscoder.app/Contents/Resources/ffmpeg
+cp third_party/ffmpeg/ffmpeg BrawTranscoder.app/Contents/MacOS/ffmpeg
 ```
 
 ### Why Not AAC

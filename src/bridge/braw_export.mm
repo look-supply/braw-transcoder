@@ -21,19 +21,17 @@ static void pixelBufferReleaseCallback(void* ref, const void* data) {
 
 // Find ffmpeg binary: bundled in app Resources, relative to executable, system
 static NSString* findFFmpeg(void) {
-    // 1. App bundle Resources/ffmpeg (production bundle)
+    // 1. Inside MacOS/ alongside main executable (bundled by build.sh)
+    NSString* execPath = [[NSBundle mainBundle] executablePath];
+    if (execPath) {
+        NSString* s = [[execPath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"ffmpeg"];
+        if (s && [[NSFileManager defaultManager] isExecutableFileAtPath:s])
+            return s;
+    }
+    // 2. App bundle Resources/ffmpeg (legacy)
     NSString* bundled = [[NSBundle mainBundle] pathForResource:@"ffmpeg" ofType:nil];
     if (bundled && [[NSFileManager defaultManager] isExecutableFileAtPath:bundled])
         return bundled;
-    // 2. Relative to executable (dev builds: build/BrawTranscoder.app/Contents/Resources/ffmpeg)
-    NSString* execPath = [[NSBundle mainBundle] executablePath];
-    if (execPath) {
-        NSString* rel = [[[execPath stringByDeletingLastPathComponent]
-                            stringByDeletingLastPathComponent]
-                            stringByAppendingPathComponent:@"Resources/ffmpeg"];
-        if (rel && [[NSFileManager defaultManager] isExecutableFileAtPath:rel])
-            return rel;
-    }
     // 3. System Homebrew installs
     NSString* sysPaths[] = {
         @"/opt/homebrew/bin/ffmpeg",
@@ -52,6 +50,8 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                        const std::string& outPath,
                        ExportProgressFn pf, void* pctx, int ci, int tc) {
     @autoreleasepool {
+        // Signal start — pf prints PROGRESS 0 to stdout, read live by parent
+        if (pf) pf(ci, tc, 0, (int)frameCount, pctx);
         uint32_t srcW = braw_clip_get_width(clip);
         uint32_t srcH = braw_clip_get_height(clip);
 
@@ -95,7 +95,7 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
             }
         }
 
-        // ---- Video only via AVAssetWriter (audio muxed by ffmpeg) ----
+        // ---- Video + Audio via AVAssetWriter (direct to outPath) ----
         NSDictionary* poolAttrs = @{
             (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
             (id)kCVPixelBufferWidthKey: @(srcW),
@@ -103,15 +103,14 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
             (id)kCVPixelBufferMetalCompatibilityKey: @YES,
             (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
         };
+        NSDictionary* poolOpts = @{
+            (id)kCVPixelBufferPoolMinimumBufferCountKey: @(8),
+        };
         CVPixelBufferPoolRef pxPool = NULL;
-        CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL, (__bridge CFDictionaryRef)poolAttrs, &pxPool);
+        CVPixelBufferPoolCreate(kCFAllocatorDefault, (__bridge CFDictionaryRef)poolOpts, (__bridge CFDictionaryRef)poolAttrs, &pxPool);
 
-        // Write video to a temp path, then mux with audio via ffmpeg to final
-        NSString* tmpVidPath = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
-        tmpVidPath = [tmpVidPath stringByAppendingPathExtension:@"mov"];
-
-        [[NSFileManager defaultManager] removeItemAtPath:tmpVidPath error:nil];
-        NSURL* url = [NSURL fileURLWithPath:tmpVidPath];
+        [[NSFileManager defaultManager] removeItemAtPath:[NSString stringWithUTF8String:outPath.c_str()] error:nil];
+        NSURL* url = [NSURL fileURLWithPath:@(outPath.c_str())];
         NSError* err = nil;
         AVAssetWriter* writer = [[AVAssetWriter alloc] initWithURL:url
                                                            fileType:AVFileTypeQuickTimeMovie
@@ -123,6 +122,7 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
             return false;
         }
 
+        // Video input
         NSDictionary* vidSettings = @{
             AVVideoCodecKey: (codec == 0) ? AVVideoCodecTypeH264 : AVVideoCodecTypeHEVC,
             AVVideoWidthKey: @(outW),
@@ -149,10 +149,29 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
             }];
         [writer addInput:videoInput];
 
+        // Audio input — 16-bit PCM (always works with AVFoundation, no static)
+        AVAssetWriterInput* audioInput = nil;
+        if (audioData && audioRate > 0 && audioSamples > 0) {
+            NSDictionary* audioSettings = @{
+                AVFormatIDKey: @(kAudioFormatLinearPCM),
+                AVSampleRateKey: @(audioRate),
+                AVNumberOfChannelsKey: @(audioChannels),
+                AVLinearPCMBitDepthKey: @(16),
+                AVLinearPCMIsFloatKey: @NO,
+                AVLinearPCMIsNonInterleaved: @NO,
+                AVLinearPCMIsBigEndianKey: @NO,
+            };
+            audioInput = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeAudio
+                                                        outputSettings:audioSettings];
+            audioInput.expectsMediaDataInRealTime = NO;
+            [writer addInput:audioInput];
+        }
+
         [writer startWriting];
         [writer startSessionAtSourceTime:kCMTimeZero];
 
         __block bool videoDone = false;
+        __block bool audioDone = (audioInput == nil);
         __block bool inputFinished = false;
         __block uint64_t frameIdx = 0;
 
@@ -208,7 +227,72 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
             }
         }];
 
-        while (!videoDone) {
+        // Audio — float to s16le, async
+        if (audioInput && audioData) {
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                @autoreleasepool {
+                    AudioStreamBasicDescription asbd = {};
+                    asbd.mSampleRate = audioRate;
+                    asbd.mFormatID = kAudioFormatLinearPCM;
+                    asbd.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+                    asbd.mBitsPerChannel = 16;
+                    asbd.mChannelsPerFrame = audioChannels;
+                    asbd.mBytesPerFrame = 2 * audioChannels;
+                    asbd.mBytesPerPacket = 2 * audioChannels;
+                    asbd.mFramesPerPacket = 1;
+
+                    CMFormatDescriptionRef audioFmtDesc = NULL;
+                    CMAudioFormatDescriptionCreate(kCFAllocatorDefault, &asbd, 0, NULL, 0, NULL, NULL, &audioFmtDesc);
+
+                    if (audioFmtDesc) {
+                        uint64_t samplesPerChunk = audioRate / (int)fps;
+                        if (samplesPerChunk == 0) samplesPerChunk = 1024;
+
+                        for (uint64_t pos = 0; pos < audioSamples && !g_cancel; pos += samplesPerChunk) {
+                            if (!audioInput.readyForMoreMediaData) { usleep(1000); continue; }
+                            uint64_t chunk = std::min(samplesPerChunk, audioSamples - pos);
+                            uint64_t numFloats = chunk * audioChannels;
+                            uint64_t byteCount = numFloats * 2;
+
+                            CMBlockBufferRef blockBuf = NULL;
+                            CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL,
+                                byteCount, NULL, NULL, 0, byteCount,
+                                kCMBlockBufferAssureMemoryNowFlag, &blockBuf);
+                            if (blockBuf) {
+                                char* dst = NULL;
+                                CMBlockBufferGetDataPointer(blockBuf, 0, NULL, NULL, &dst);
+                                if (dst) {
+                                    for (uint64_t s = 0; s < numFloats; s++) {
+                                        float f = audioData[pos * audioChannels + s];
+                                        if (f > 1.0f) f = 1.0f;
+                                        if (f < -1.0f) f = -1.0f;
+                                        int16_t sample = (int16_t)(f * 32767.0f);
+                                        dst[s * 2 + 0] = (uint8_t)(sample >> 0);
+                                        dst[s * 2 + 1] = (uint8_t)(sample >> 8);
+                                    }
+                                }
+                                CMSampleBufferRef sbuf = NULL;
+                                CMTime audioPts = CMTimeMake((int64_t)pos, (int32_t)audioRate);
+                                CMAudioSampleBufferCreateWithPacketDescriptions(kCFAllocatorDefault,
+                                    blockBuf, true, NULL, NULL, audioFmtDesc,
+                                    (CMItemCount)chunk, audioPts, NULL, &sbuf);
+                                if (sbuf) { [audioInput appendSampleBuffer:sbuf]; CFRelease(sbuf); }
+                                CFRelease(blockBuf);
+                            }
+                        }
+                        CFRelease(audioFmtDesc);
+                    }
+                    free(audioData);
+                    [audioInput markAsFinished];
+                    audioDone = true;
+                }
+            });
+        } else {
+            if (audioData) free(audioData);
+            audioDone = true;
+        }
+
+        while (!videoDone || !audioDone) {
             if (g_cancel) { [writer cancelWriting]; break; }
             usleep(50000);
         }
@@ -218,73 +302,8 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
             while (writer.status == AVAssetWriterStatusWriting) usleep(50000);
         }
 
-        bool videoOK = (writer.status == AVAssetWriterStatusCompleted);
         if (pxPool) CVPixelBufferPoolRelease(pxPool);
-
-        // ---- Mux audio via ffmpeg ----
-        bool finalMuxed = false;
-        if (videoOK && audioData && audioRate > 0 && audioSamples > 0 && !g_cancel) {
-            NSString* ffmpeg = findFFmpeg();
-            if (ffmpeg) {
-                NSString* tmpAudioPath = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
-                tmpAudioPath = [tmpAudioPath stringByAppendingPathExtension:@"raw"];
-                uint64_t totalBytes = audioSamples * audioChannels * sizeof(float);
-                NSData* audioRaw = [NSData dataWithBytesNoCopy:audioData
-                                                        length:(NSUInteger)totalBytes
-                                                  freeWhenDone:NO];
-                if ([audioRaw writeToFile:tmpAudioPath atomically:NO]) {
-                    NSString* finalPath = @(outPath.c_str());
-                    [[NSFileManager defaultManager] removeItemAtPath:finalPath error:nil];
-
-                    NSTask* task = [[NSTask alloc] init];
-                    task.executableURL = [NSURL fileURLWithPath:ffmpeg];
-                    task.arguments = @[
-                        @"-y",
-                        @"-i", tmpVidPath,
-                        @"-f", @"f32le",
-                        @"-ar", [NSString stringWithFormat:@"%u", audioRate],
-                        @"-ac", [NSString stringWithFormat:@"%u", audioChannels],
-                        @"-i", tmpAudioPath,
-                        @"-c:v", @"copy",
-                        @"-c:a", @"pcm_s24le",
-                        @"-map", @"0:v:0",
-                        @"-map", @"1:a:0",
-                        @"-movflags", @"+faststart",
-                        finalPath,
-                    ];
-                    task.standardError = [NSPipe pipe];
-                    NSError* launchErr = nil;
-                    [task launchAndReturnError:&launchErr];
-                    if (launchErr) {
-                        fprintf(stderr, "ffmpeg launch failed: %s\n", [[launchErr description] UTF8String]);
-                    } else {
-                        [task waitUntilExit];
-                        if (task.terminationStatus == 0) {
-                            finalMuxed = true;
-                        } else {
-                            NSData* errData = [[(NSPipe*)task.standardError fileHandleForReading] readDataToEndOfFile];
-                            fprintf(stderr, "ffmpeg exited %d: %s\n",
-                                    task.terminationStatus,
-                                    [[[NSString alloc] initWithData:errData
-                                                          encoding:NSUTF8StringEncoding] UTF8String]);
-                        }
-                    }
-                    [[NSFileManager defaultManager] removeItemAtPath:tmpAudioPath error:nil];
-                }
-            } else {
-                fprintf(stderr, "ffmpeg not found — video exported without audio\n");
-            }
-        }
-
-        if (!finalMuxed && videoOK) {
-            [[NSFileManager defaultManager] removeItemAtPath:@(outPath.c_str()) error:nil];
-            [[NSFileManager defaultManager] copyItemAtPath:tmpVidPath toPath:@(outPath.c_str()) error:nil];
-        }
-
-        free(audioData);
-
-        [[NSFileManager defaultManager] removeItemAtPath:tmpVidPath error:nil];
-        return [[NSFileManager defaultManager] fileExistsAtPath:@(outPath.c_str())];
+        return writer.status == AVAssetWriterStatusCompleted;
     }
 }
 
@@ -359,9 +378,10 @@ int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
     NSString* helper = helperPath();
     if (!helper) { fprintf(stderr, "export_helper binary not found\n"); return -1; }
 
-    // Copy indices to local storage — the Swift caller's array may be deallocated
-    // by the time the async block runs. We can't capture the raw pointer.
+    // Copy async-safe values — Swift's outputDir pointer dangles by the
+    // time the dispatch_async block executes.
     std::vector<int> indicesCopy(indices, indices + count);
+    std::string outDirBase = (outputDir && outputDir[0]) ? outputDir : "";
 
     g_running=true; g_cancel=false;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
@@ -384,9 +404,12 @@ int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                 NSString* bn = [[NSString stringWithUTF8String:fnBuf] stringByDeletingPathExtension];
                 if (!bn) { fprintf(stderr, "Skipping project index %d: bad filename\n", projectIdx); continue; }
 
-                // Always use source file's directory for output (ignore Swift's outputDir
-                // which may be corrupted by dangling C string pointers)
-                NSString* outDir = [[NSString stringWithUTF8String:fpBuf] stringByDeletingLastPathComponent];
+                NSString* outDir;
+                if (!outDirBase.empty()) {
+                    outDir = [NSString stringWithUTF8String:outDirBase.c_str()];
+                } else {
+                    outDir = [[NSString stringWithUTF8String:fpBuf] stringByDeletingLastPathComponent];
+                }
                 NSString* outPath = [outDir stringByAppendingPathComponent:[bn stringByAppendingString:@"_export.mov"]];
                 if (!outPath) { fprintf(stderr, "Skipping project index %d: path construction failed\n", projectIdx); continue; }
 

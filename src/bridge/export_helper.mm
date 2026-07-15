@@ -17,19 +17,36 @@ static void progressFn(int ci, int tc, int fi, int tf, void*) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 7) return 1;
+    fprintf(stderr, "HELPER: start %s -> %s\n", argv[1], argv[2]);
+    if (argc < 7) {
+        fprintf(stderr, "HELPER: insufficient args (%d)\n", argc);
+        return 1;
+    }
 
     BrawProjectHandle* proj = braw_project_create();
-    if (!proj) return 1;
-    if (braw_project_import(proj, argv[1]) < 0) { braw_project_destroy(proj); return 1; }
+    if (!proj) { fprintf(stderr, "HELPER: project_create failed\n"); return 1; }
+
+    int imp = braw_project_import(proj, argv[1]);
+    if (imp < 0) {
+        fprintf(stderr, "HELPER: import failed (%d) for %s\n", imp, argv[1]);
+        braw_project_destroy(proj);
+        return 1;
+    }
+    fprintf(stderr, "HELPER: import OK idx=%d\n", imp);
 
     int indices[] = {0};
     int ret = braw_export_start_inprocess(proj, indices, 1,
         atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]),
         argv[2], progressFn, nullptr);
-    if (ret != 0) { braw_project_destroy(proj); return 1; }
+    if (ret != 0) {
+        fprintf(stderr, "HELPER: export_start_inprocess returned %d\n", ret);
+        braw_project_destroy(proj);
+        return 1;
+    }
+    fprintf(stderr, "HELPER: export_start_inprocess OK, waiting...\n");
 
     while (braw_export_is_running()) usleep(100000);
+    fprintf(stderr, "HELPER: done\n");
     braw_project_destroy(proj);
     return 0;
 }

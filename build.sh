@@ -8,21 +8,24 @@ APP_BUNDLE="$BUILD_DIR/BrawTranscoder.app"
 
 bundle_binaries() {
     if [ -f "$FFMPEG_SRC" ]; then
-        mkdir -p "$APP_BUNDLE/Contents/Resources"
-        cp "$FFMPEG_SRC" "$APP_BUNDLE/Contents/Resources/ffmpeg"
-        chmod +x "$APP_BUNDLE/Contents/Resources/ffmpeg"
+        mkdir -p "$APP_BUNDLE/Contents/MacOS"
+        cp "$FFMPEG_SRC" "$APP_BUNDLE/Contents/MacOS/ffmpeg"
+        chmod +x "$APP_BUNDLE/Contents/MacOS/ffmpeg"
         echo "  ffmpeg bundled ✓"
     else
         echo "  WARNING: ffmpeg binary not found at $FFMPEG_SRC"
     fi
-    # export_helper must be inside the app bundle so subprocess
-    # resolves [NSBundle mainBundle] to the app bundle and finds ffmpeg
     if [ -f "$BUILD_DIR/export_helper" ]; then
         mkdir -p "$APP_BUNDLE/Contents/MacOS"
         cp "$BUILD_DIR/export_helper" "$APP_BUNDLE/Contents/MacOS/export_helper"
         chmod +x "$APP_BUNDLE/Contents/MacOS/export_helper"
         echo "  export_helper bundled ✓"
     fi
+    # Re-sign bundled binaries — cp can corrupt code signatures,
+    # causing macOS to SIGKILL the process on launch
+    codesign -f -s - "$APP_BUNDLE/Contents/MacOS/export_helper" 2>/dev/null
+    codesign -f -s - "$APP_BUNDLE/Contents/MacOS/ffmpeg" 2>/dev/null
+    echo "  binaries re-signed ✓"
 }
 
 case "${1:-build}" in
