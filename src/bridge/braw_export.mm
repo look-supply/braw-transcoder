@@ -27,7 +27,47 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
         uint32_t srcW = braw_clip_get_width(clip);
         uint32_t srcH = braw_clip_get_height(clip);
 
-        // CVPixelBufferPool for Metal-compatible pixel buffers (required by HEVC encoder)
+        // ---- Extract audio with channel pruning ----
+        uint32_t audioRate = 0, audioChannels = 0;
+        uint64_t audioSamples = 0;
+        float* audioData = braw_clip_extract_audio(clip, &audioRate, &audioChannels, &audioSamples);
+        if (audioData && audioRate > 0 && audioSamples > 0) {
+            bool* channelActive = (bool*)calloc(audioChannels, sizeof(bool));
+            if (channelActive) {
+                for (uint64_t i = 0; i < audioSamples && audioChannels > 0; i++)
+                    for (uint32_t ch = 0; ch < audioChannels; ch++)
+                        if (!channelActive[ch] && fabs(audioData[i * audioChannels + ch]) > 0.001f)
+                            channelActive[ch] = true;
+                uint32_t activeCount = 0;
+                for (uint32_t ch = 0; ch < audioChannels; ch++)
+                    if (channelActive[ch]) activeCount++;
+                if (activeCount == 0) activeCount = (audioChannels >= 2) ? 2 : audioChannels;
+                if (activeCount < audioChannels) {
+                    uint32_t* remap = (uint32_t*)malloc(audioChannels * sizeof(uint32_t));
+                    uint32_t newCh = 0;
+                    for (uint32_t ch = 0; ch < audioChannels; ch++) {
+                        if (channelActive[ch]) remap[ch] = newCh++;
+                        else remap[ch] = UINT32_MAX;
+                    }
+                    if (newCh < 2 && audioChannels >= 2) {
+                        for (uint32_t ch = 0; ch < audioChannels && newCh < 2; ch++)
+                            if (remap[ch] == UINT32_MAX) { remap[ch] = newCh++; activeCount = 2; }
+                    }
+                    float* pruned = (float*)malloc(audioSamples * activeCount * sizeof(float));
+                    for (uint64_t i = 0; i < audioSamples; i++)
+                        for (uint32_t ch = 0; ch < audioChannels; ch++)
+                            if (remap[ch] != UINT32_MAX)
+                                pruned[i * activeCount + remap[ch]] = audioData[i * audioChannels + ch];
+                    free(audioData);
+                    audioData = pruned;
+                    audioChannels = activeCount;
+                    free(remap);
+                }
+                free(channelActive);
+            }
+        }
+
+        // ---- Video + Audio via AVAssetWriter ----
         NSDictionary* poolAttrs = @{
             (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
             (id)kCVPixelBufferWidthKey: @(srcW),
@@ -46,6 +86,7 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                                                               error:&err];
         if (!writer) {
             fprintf(stderr, "AVAssetWriter create failed: %s\n", [[err description] UTF8String]);
+            if (audioData) free(audioData);
             if (pxPool) CVPixelBufferPoolRelease(pxPool);
             return false;
         }
@@ -76,66 +117,15 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
             }];
         [writer addInput:videoInput];
 
-        // Audio — LinearPCM 32-bit float. 24-bit packed integer in MOV containers
-        // produces static on macOS native players. Float PCM maps directly from
-        // BRAW's float samples, uses standard 4-byte alignment, and is universally
-        // supported. Also prune silent channels that BRAW may report but have no
-        // actual audio content.
-        uint32_t audioRate = 0, audioChannels = 0;
-        uint64_t audioSamples = 0;
-        float* audioData = braw_clip_extract_audio(clip, &audioRate, &audioChannels, &audioSamples);
+        // Audio input — 24-bit signed integer PCM
         AVAssetWriterInput* audioInput = nil;
         if (audioData && audioRate > 0 && audioSamples > 0) {
-            // Detect non-empty channels (peak > -60dBFS)
-            bool* channelActive = (bool*)calloc(audioChannels, sizeof(bool));
-            if (channelActive) {
-                for (uint64_t i = 0; i < audioSamples && audioChannels > 0; i++) {
-                    for (uint32_t ch = 0; ch < audioChannels; ch++) {
-                        if (!channelActive[ch] && fabs(audioData[i * audioChannels + ch]) > 0.001f)
-                            channelActive[ch] = true;
-                    }
-                }
-                uint32_t activeCount = 0;
-                for (uint32_t ch = 0; ch < audioChannels; ch++) {
-                    if (channelActive[ch]) activeCount++;
-                }
-                // Keep at least 2 channels (stereo) if all appear silent
-                if (activeCount == 0) activeCount = (audioChannels >= 2) ? 2 : audioChannels;
-                if (activeCount < audioChannels) {
-                    // Build channel remap: oldCh -> newCh
-                    uint32_t* remap = (uint32_t*)malloc(audioChannels * sizeof(uint32_t));
-                    uint32_t newCh = 0;
-                    for (uint32_t ch = 0; ch < audioChannels; ch++) {
-                        if (channelActive[ch]) remap[ch] = newCh++;
-                        else remap[ch] = UINT32_MAX;
-                    }
-                    // Still need at least 2 channels
-                    if (newCh < 2 && audioChannels >= 2) {
-                        for (uint32_t ch = 0; ch < audioChannels && newCh < 2; ch++) {
-                            if (remap[ch] == UINT32_MAX) { remap[ch] = newCh++; }
-                        }
-                        activeCount = 2;
-                    }
-                    float* pruned = (float*)malloc(audioSamples * activeCount * sizeof(float));
-                    for (uint64_t i = 0; i < audioSamples; i++) {
-                        for (uint32_t ch = 0; ch < audioChannels; ch++) {
-                            if (remap[ch] != UINT32_MAX)
-                                pruned[i * activeCount + remap[ch]] = audioData[i * audioChannels + ch];
-                        }
-                    }
-                    free(audioData);
-                    audioData = pruned;
-                    audioChannels = activeCount;
-                    free(remap);
-                }
-                free(channelActive);
-            }
             NSDictionary* audioSettings = @{
                 AVFormatIDKey: @(kAudioFormatLinearPCM),
                 AVSampleRateKey: @(audioRate),
                 AVNumberOfChannelsKey: @(audioChannels),
-                AVLinearPCMBitDepthKey: @(32),
-                AVLinearPCMIsFloatKey: @YES,
+                AVLinearPCMBitDepthKey: @(24),
+                AVLinearPCMIsFloatKey: @NO,
                 AVLinearPCMIsNonInterleaved: @NO,
                 AVLinearPCMIsBigEndianKey: @NO,
             };
@@ -159,16 +149,12 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                 bool origPreviewLUT = braw_clip_get_preview_lut(clip);
                 braw_clip_set_preview_lut(clip, false);
 
-                // Single-threaded GPU decode — fastest and most reliable path
                 while (frameIdx < frameCount && !g_cancel && !inputFinished) {
-                    // Check readiness AFTER decode (encoder may have filled during decode)
                     int fw = 0, fh = 0;
                     void* mtlBuf = braw_clip_decode_frame_gpu(clip, frameIdx, &fw, &fh);
                     if (!mtlBuf) { frameIdx++; continue; }
 
-                    // Re-check readiness before append (decoder took time)
                     if (!videoInput.readyForMoreMediaData) {
-                        // Not ready — free buffer and break; block will be called again
                         braw_clip_free_frame_gpu(mtlBuf);
                         break;
                     }
@@ -190,8 +176,6 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                                     (long long)frameIdx, [[e description] UTF8String]);
                             CVPixelBufferRelease(pxBuf);
                             braw_clip_free_frame_gpu(mtlBuf);
-                            // Don't set frameIdx = frameCount — just break. AVFoundation
-                            // will call this block again when ready for more data.
                             break;
                         }
                         CVPixelBufferRelease(pxBuf);
@@ -211,22 +195,34 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
             }
         }];
 
-        // Audio — write 32-bit float PCM directly (no conversion needed)
+        // Audio — float to s24le, with proper channel layout
         if (audioInput && audioData) {
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
                 @autoreleasepool {
                     AudioStreamBasicDescription asbd = {};
                     asbd.mSampleRate = audioRate;
                     asbd.mFormatID = kAudioFormatLinearPCM;
-                    asbd.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
-                    asbd.mBitsPerChannel = 32;
+                    asbd.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+                    asbd.mBitsPerChannel = 24;
                     asbd.mChannelsPerFrame = audioChannels;
-                    asbd.mBytesPerFrame = 4 * audioChannels;
-                    asbd.mBytesPerPacket = 4 * audioChannels;
+                    asbd.mBytesPerFrame = 3 * audioChannels;
+                    asbd.mBytesPerPacket = 3 * audioChannels;
                     asbd.mFramesPerPacket = 1;
 
+                    AudioChannelLayout channelLayout;
+                    memset(&channelLayout, 0, sizeof(channelLayout));
+                    if (audioChannels == 1) {
+                        channelLayout.mChannelLayoutTag = kAudioChannelLayoutTag_Mono;
+                    } else if (audioChannels == 2) {
+                        channelLayout.mChannelLayoutTag = kAudioChannelLayoutTag_Stereo;
+                    } else {
+                        channelLayout.mChannelLayoutTag = kAudioChannelLayoutTag_DiscreteInOrder;
+                        channelLayout.mNumberChannelDescriptions = (UInt32)audioChannels;
+                    }
+
                     CMFormatDescriptionRef audioFmtDesc = NULL;
-                    CMAudioFormatDescriptionCreate(kCFAllocatorDefault, &asbd, 0, NULL, 0, NULL, NULL, &audioFmtDesc);
+                    CMAudioFormatDescriptionCreate(kCFAllocatorDefault, &asbd,
+                        sizeof(channelLayout), &channelLayout, 0, NULL, NULL, &audioFmtDesc);
 
                     if (audioFmtDesc) {
                         uint64_t samplesPerChunk = audioRate / (int)fps;
@@ -235,7 +231,8 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                         for (uint64_t pos = 0; pos < audioSamples && !g_cancel; pos += samplesPerChunk) {
                             if (!audioInput.readyForMoreMediaData) { usleep(1000); continue; }
                             uint64_t chunk = std::min(samplesPerChunk, audioSamples - pos);
-                            uint64_t byteCount = chunk * audioChannels * sizeof(float);
+                            uint64_t numFloats = chunk * audioChannels;
+                            uint64_t byteCount = numFloats * 3;
 
                             CMBlockBufferRef blockBuf = NULL;
                             CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL,
@@ -245,7 +242,15 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                                 char* dst = NULL;
                                 CMBlockBufferGetDataPointer(blockBuf, 0, NULL, NULL, &dst);
                                 if (dst) {
-                                    memcpy(dst, audioData + pos * audioChannels, byteCount);
+                                    for (uint64_t s = 0; s < numFloats; s++) {
+                                        float f = audioData[pos * audioChannels + s];
+                                        if (f > 1.0f) f = 1.0f;
+                                        if (f < -1.0f) f = -1.0f;
+                                        int32_t sample = (int32_t)(f * 8388607.0f);
+                                        dst[s * 3 + 0] = (sample >> 0) & 0xff;
+                                        dst[s * 3 + 1] = (sample >> 8) & 0xff;
+                                        dst[s * 3 + 2] = (sample >> 16) & 0xff;
+                                    }
                                 }
                                 CMSampleBufferRef sbuf = NULL;
                                 CMTime audioPts = CMTimeMake((int64_t)pos, (int32_t)audioRate);

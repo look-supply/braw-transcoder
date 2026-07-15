@@ -524,12 +524,22 @@ float* BrawDecoder::ExtractAudio(uint32_t* outSampleRate, uint32_t* outChannels,
         return nullptr;
     }
 
-    float* samples = (float*)malloc(*outSampleCount * *outChannels * sizeof(float));
+    uint64_t maxFloats = *outSampleCount * *outChannels;
+    float* samples = (float*)malloc(maxFloats * sizeof(float));
     if (samples) {
         uint32_t samplesRead = 0, bytesRead = 0;
         audio->GetAudioSamples(0, samples,
-                                (uint32_t)(*outSampleCount * *outChannels * sizeof(float)),
-                                (uint32_t)*outSampleCount, &samplesRead, &bytesRead);
+                                (uint32_t)(maxFloats * sizeof(float)),
+                                (uint32_t)maxFloats, &samplesRead, &bytesRead);
+        if (samplesRead > 0 && bytesRead > 0) {
+            uint64_t actualFloats = (uint64_t)bytesRead / sizeof(float);
+            if (actualFloats < maxFloats) {
+                maxFloats = actualFloats;
+                *outSampleCount = maxFloats / *outChannels;
+                float* trimmed = (float*)realloc(samples, maxFloats * sizeof(float));
+                if (trimmed) samples = trimmed;
+            }
+        }
     }
     audio->Release();
     return samples;
