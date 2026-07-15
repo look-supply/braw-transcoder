@@ -15,7 +15,7 @@ struct InspectorView: View {
             Divider()
             
             if let clip = project.selectedClip {
-                InspectorContent(clip: clip, isExporting: project.isExporting)
+                InspectorContent(clip: clip, project: project)
             } else {
                 Spacer()
                 VStack(spacing: 8) {
@@ -33,7 +33,8 @@ struct InspectorView: View {
 
 struct InspectorContent: View {
     @ObservedObject var clip: ClipModel
-    let isExporting: Bool
+    @ObservedObject var project: ProjectModel
+    var isExporting: Bool { project.isExporting }
     
     var body: some View {
         ScrollView {
@@ -129,6 +130,16 @@ struct InspectorContent: View {
                             ), in: -5...5).controlSize(.small)
                             .disabled(isExporting)
                         }
+                        
+                        Divider()
+                        
+                        Button(action: { project.applyClipSettingsToAll(from: project.selectedIndex) }) {
+                            Label("Apply to All Clips", systemImage: "square.and.arrow.down")
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11))
+                        .foregroundColor(.accentColor)
+                        .disabled(isExporting)
                     }
                     .padding(.vertical, 4)
                 }

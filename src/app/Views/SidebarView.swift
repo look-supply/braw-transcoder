@@ -14,6 +14,12 @@ struct SidebarView: View {
                     Text("\(selectedIndices.count) selected")
                         .font(.system(size: 11)).foregroundColor(.accentColor)
                 }
+                if project.clipCount > 0 {
+                    Button(action: { project.clearAllClips(); selectedIndices.removeAll() }) {
+                        Image(systemName: "trash")
+                    }.help("Clear all clips")
+                    .disabled(project.isExporting)
+                }
                 Button(action: importFiles) {
                     Image(systemName: "plus")
                 }.help("Import BRAW files")
@@ -50,12 +56,10 @@ struct SidebarView: View {
                                     Button("Copy Settings") {
                                         project.copySettings(from: index)
                                     }
-                                    .keyboardShortcut("c", modifiers: .command)
                                     
                                     Button("Paste Settings") {
                                         project.pasteSettings(to: index)
                                     }
-                                    .keyboardShortcut("v", modifiers: .command)
                                     
                                     Divider()
                                     
@@ -70,6 +74,30 @@ struct SidebarView: View {
                     }
                 }
             }
+            .background(
+                Button("") {
+                    deleteSelectedClips()
+                }
+                .keyboardShortcut(.delete, modifiers: [])
+                .opacity(0)
+                .frame(width: 0, height: 0)
+            )
+            .background(
+                Button("") {
+                    copyActiveClipSettings()
+                }
+                .keyboardShortcut("c", modifiers: .command)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+            )
+            .background(
+                Button("") {
+                    pasteToSelectedClips()
+                }
+                .keyboardShortcut("v", modifiers: .command)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+            )
         }
     }
     
@@ -92,6 +120,35 @@ struct SidebarView: View {
     
     var multiSelectedIndices: [Int] {
         selectedIndices.sorted()
+    }
+    
+    func deleteSelectedClips() {
+        guard !project.isExporting, !selectedIndices.isEmpty else { return }
+        let sorted = selectedIndices.sorted(by: >)
+        for idx in sorted {
+            project.removeClip(at: idx)
+        }
+        selectedIndices.removeAll()
+    }
+    
+    func copyActiveClipSettings() {
+        guard !project.isExporting else { return }
+        let sourceIndex: Int
+        if selectedIndices.count == 1, let only = selectedIndices.first {
+            sourceIndex = only
+        } else {
+            sourceIndex = project.selectedIndex
+        }
+        guard sourceIndex >= 0 else { return }
+        project.copySettings(from: sourceIndex)
+    }
+    
+    func pasteToSelectedClips() {
+        guard !project.isExporting, !selectedIndices.isEmpty else { return }
+        guard project.copiedSettings != nil else { return }
+        for idx in selectedIndices {
+            project.pasteSettings(to: idx)
+        }
     }
 }
 

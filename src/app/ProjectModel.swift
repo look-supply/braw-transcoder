@@ -221,6 +221,8 @@ final class ClipModel: Identifiable, ObservableObject {
         tint = _braw_clip_get_tint(h)
         exposure = _braw_clip_get_exposure(h)
         highlightRecovery = _braw_clip_get_highlight_recovery(h)
+        previewLUT = _braw_clip_get_preview_lut(h)
+        bakeLUT = _braw_clip_get_bake_lut(h)
     }
     
     func applyISOPreset(_ index: Int) {
@@ -303,11 +305,25 @@ final class ClipModel: Identifiable, ObservableObject {
     }
 }
 
+// ── Clipboard for copy/paste settings ──────────────
+struct StoredAdjustments {
+    var iso: UInt32
+    var colorTemp: UInt32
+    var tint: Int16
+    var exposure: Float
+    var highlightRecovery: Bool
+    var previewLUT: Bool
+    var bakeLUT: Bool
+    var isoPresetIndex: Int
+    var colorPresetIndex: Int
+}
+
 final class ProjectModel: ObservableObject {
     var projectHandle: OpaquePointer?
     @Published var clipCount = 0
     @Published var selectedIndex = -1
     @Published var isExporting = false
+    @Published var copiedSettings: StoredAdjustments?
     private var clipCache: [Int: ClipModel] = [:]
     private let importQueue = DispatchQueue(label: "com.braw.import", qos: .userInitiated)
     
@@ -384,15 +400,56 @@ final class ProjectModel: ObservableObject {
         return model
     }
     
-    func copySettings(from index: Int) {}
+    func copySettings(from index: Int) {
+        guard let clip = getClip(at: index) else { return }
+        copiedSettings = StoredAdjustments(
+            iso: clip.iso,
+            colorTemp: clip.colorTemp,
+            tint: clip.tint,
+            exposure: clip.exposure,
+            highlightRecovery: clip.highlightRecovery,
+            previewLUT: clip.previewLUT,
+            bakeLUT: clip.bakeLUT,
+            isoPresetIndex: clip.isoPresetIndex,
+            colorPresetIndex: clip.colorPresetIndex
+        )
+    }
     
     func pasteSettings(to index: Int) {
-        guard let h = projectHandle, index >= 0, index < clipCount else { return }
-        guard let targetHandle = _braw_project_get_clip(h, Int32(index)) else { return }
-        let srcIdx = selectedIndex
-        guard srcIdx >= 0, srcIdx < clipCount, srcIdx != index else { return }
-        guard let sourceHandle = _braw_project_get_clip(h, Int32(srcIdx)) else { return }
-        _braw_clip_copy_adjustments(sourceHandle, targetHandle)
+        guard let settings = copiedSettings else { return }
+        guard let clip = getClip(at: index) else { return }
+        clip.iso = settings.iso
+        clip.colorTemp = settings.colorTemp
+        clip.tint = settings.tint
+        clip.exposure = settings.exposure
+        clip.highlightRecovery = settings.highlightRecovery
+        clip.previewLUT = settings.previewLUT
+        clip.bakeLUT = settings.bakeLUT
+        clip.isoPresetIndex = settings.isoPresetIndex
+        clip.colorPresetIndex = settings.colorPresetIndex
+    }
+    
+    func clearAllClips() {
+        guard let h = projectHandle else { return }
+        for clip in clipCache.values {
+            clip.releaseDecoder()
+        }
+        clipCache.removeAll()
+        _braw_project_clear(h)
+        clipCount = 0
+        selectedIndex = -1
+    }
+    
+    func applyClipSettingsToAll(from sourceIndex: Int) {
+        guard let h = projectHandle else { return }
+        guard let srcHandle = _braw_project_get_clip(h, Int32(sourceIndex)) else { return }
+        for i in 0..<clipCount {
+            guard i != sourceIndex else { continue }
+            if let dstHandle = _braw_project_get_clip(h, Int32(i)) {
+                _braw_clip_copy_adjustments(srcHandle, dstHandle)
+                getClip(at: i)?.refreshAdjustmentsFromEngine()
+            }
+        }
     }
     
     var selectedClip: ClipModel? {
