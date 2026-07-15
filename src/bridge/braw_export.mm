@@ -11,13 +11,17 @@
 static std::atomic<bool> g_running{false};
 static std::atomic<bool> g_cancel{false};
 
+// Track current export subprocess so cancel can terminate it
+static NSTask* g_exportTask = nil;
+
 // Callback for CVPixelBufferCreateWithBytes — frees the malloc'd pixel data
 static void pixelBufferReleaseCallback(void* ref, const void* data) {
     braw_clip_free_frame((uint8_t*)data);
 }
 
-// GPU decode for speed (18fps vs 2fps CPU). No decoder resets — one lifecycle
-// per clip. Subprocess isolation reclaims SDK memory on exit. No segmentation.
+// GPU decode for speed (18fps vs 2fps CPU). Decoder is torn down and
+// recreated every CHUNK_SIZE frames to clear persistent GPU memory leaks
+// in the BRAW SDK. AVAssetWriter stays open across resets — single output.
 
 // Find ffmpeg binary: bundled in app Resources, relative to executable, system
 static NSString* findFFmpeg(void) {
@@ -174,6 +178,7 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
         __block bool audioDone = (audioInput == nil);
         __block bool inputFinished = false;
         __block uint64_t frameIdx = 0;
+        static const int64_t CHUNK_SIZE = 200;
 
         [videoInput requestMediaDataWhenReadyOnQueue:dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0)
                                           usingBlock:^{
@@ -182,6 +187,12 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                 braw_clip_set_preview_lut(clip, false);
 
                 while (frameIdx < frameCount && !g_cancel && !inputFinished) {
+                    // Release and recreate decoder at chunk boundaries to clear
+                    // persistent GPU memory leaks in the BRAW SDK.
+                    if (frameIdx % CHUNK_SIZE == 0 && frameIdx > 0) {
+                        braw_clip_release_decoder(clip);
+                    }
+
                     int fw = 0, fh = 0;
                     void* mtlBuf = braw_clip_decode_frame_gpu(clip, frameIdx, &fw, &fh);
                     if (!mtlBuf) { frameIdx++; continue; }
@@ -223,6 +234,7 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                         inputFinished = true;
                     }
                     videoDone = true;
+                    braw_clip_release_decoder(clip);
                 }
             }
         }];
@@ -433,6 +445,9 @@ int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                 [task launchAndReturnError:&err];
                 if (err) { fprintf(stderr, "Launch failed: %s\n", [[err description] UTF8String]); continue; }
 
+                // Track the current task for cancellation
+                g_exportTask = task;
+
                 uint64_t totalFrames = braw_clip_get_frame_count(clip);
                 NSMutableData* buf = [[NSMutableData alloc] init];
                 while ([task isRunning] && !g_cancel) {
@@ -454,6 +469,7 @@ int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                 }
                 if (g_cancel && [task isRunning]) [task terminate];
                 [task waitUntilExit];
+                g_exportTask = nil;
                 NSData* ed = [eh readDataToEndOfFile];
                 if (ed.length > 0) fprintf(stderr, "helper: %s\n", [[[NSString alloc] initWithData:ed encoding:NSUTF8StringEncoding] UTF8String]);
                 if ([task terminationStatus] == 0)
@@ -461,6 +477,10 @@ int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                 else
                     fprintf(stderr, "Export FAILED: %s\n", [outPath UTF8String]);
             }
+            // Safety kill: ensure no helper lingers
+            [g_exportTask terminate];
+            [g_exportTask waitUntilExit];
+            g_exportTask = nil;
             g_running=false;
             if (pf) pf(count-1, count, -1, -1, ctx);
         }
@@ -468,7 +488,18 @@ int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
     return 0;
 }
 
-void braw_export_cancel(void) { g_cancel=true; }
+void braw_export_cancel(void) {
+    g_cancel=true;
+    [g_exportTask terminate];
+}
+
 int  braw_export_is_running(void) { return g_running?1:0; }
+
+void braw_export_cleanup(void) {
+    g_cancel=true;
+    [g_exportTask terminate];
+    g_exportTask = nil;
+    g_running=false;
+}
 
 } // extern "C"

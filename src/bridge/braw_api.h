@@ -83,6 +83,7 @@ int  braw_export_start_inprocess(BrawProjectHandle* proj, const int* indices, in
                                   ExportProgressFn progressFn, void* ctx);
 void braw_export_cancel(void);
 int  braw_export_is_running(void);
+void braw_export_cleanup(void);
 
 #ifdef __cplusplus
 }

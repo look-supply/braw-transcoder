@@ -51,6 +51,7 @@ import Metal
 @_silgen_name("braw_export_start")            func _braw_export_start(_ proj: OpaquePointer, _ indices: UnsafePointer<Int32>, _ count: Int32, _ codec: Int32, _ proResProfile: Int32, _ resolutionMode: Int32, _ dataRateMbps: Int32, _ outputDir: UnsafePointer<CChar>, _ progressFn: @convention(c) (Int32, Int32, Int32, Int32, UnsafeMutableRawPointer?) -> Void, _ ctx: UnsafeMutableRawPointer?) -> Int32
 @_silgen_name("braw_export_cancel")           func _braw_export_cancel()
 @_silgen_name("braw_export_is_running")       func _braw_export_is_running() -> Int32
+@_silgen_name("braw_export_cleanup")          func _braw_export_cleanup()
 
 // ── Image data holder (bridge-safe) ────────────────
 struct FrameImage {
@@ -511,6 +512,7 @@ final class ExportManager: ObservableObject, @unchecked Sendable {
                     let mgr = Unmanaged<ExportManager>.fromOpaque(rawCtx).takeUnretainedValue()
                     DispatchQueue.main.async {
                         if frameIdx < 0 {
+                            _braw_export_cleanup()
                             mgr.isExporting = false
                             mgr.projectModel.isExporting = false
                             mgr.progress = 1.0
@@ -532,6 +534,7 @@ final class ExportManager: ObservableObject, @unchecked Sendable {
     
     func cancel() {
         _braw_export_cancel()
+        _braw_export_cleanup()
         isExporting = false
         projectModel.isExporting = false
     }
