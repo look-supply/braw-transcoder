@@ -20,10 +20,23 @@ const char*     braw_clip_get_filepath(BrawClipHandle* h);
 const char*     braw_clip_get_gamma(BrawClipHandle* h);
 const char*     braw_clip_get_gamut(BrawClipHandle* h);
 uint16_t        braw_clip_get_color_science_gen(BrawClipHandle* h);
+const char*     braw_clip_get_camera_type(BrawClipHandle* h);
 uint32_t        braw_clip_get_width(BrawClipHandle* h);
 uint32_t        braw_clip_get_height(BrawClipHandle* h);
 float           braw_clip_get_frame_rate(BrawClipHandle* h);
 uint64_t        braw_clip_get_frame_count(BrawClipHandle* h);
+
+// Native camera settings (captured on first decode)
+uint32_t braw_clip_get_native_iso(BrawClipHandle* h);
+uint32_t braw_clip_get_native_color_temp(BrawClipHandle* h);
+int16_t  braw_clip_get_native_tint(BrawClipHandle* h);
+float    braw_clip_get_native_exposure(BrawClipHandle* h);
+void     braw_clip_capture_native(BrawClipHandle* h);
+
+// Free-form metadata from BRAW file
+int            braw_clip_get_metadata_count(BrawClipHandle* h);
+const char*    braw_clip_get_metadata_key(BrawClipHandle* h, int index);
+const char*    braw_clip_get_metadata_value(BrawClipHandle* h, int index);
 
 // Adjustments (get/set)
 uint32_t braw_clip_get_iso(BrawClipHandle* h);

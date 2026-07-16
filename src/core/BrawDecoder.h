@@ -2,6 +2,7 @@
 #include "core/Types.h"
 #include <string>
 #include <vector>
+#include <map>
 #include <functional>
 #include <memory>
 
@@ -67,6 +68,7 @@ public:
     std::string GetClipGamma() const;
     std::string GetClipGamut() const;
     uint16_t    GetColorScienceGen() const;
+    std::map<std::string, std::string> GetFreeFormMetadata() const;
 
     // Audio extraction: returns PCM float samples (caller frees with free())
     float* ExtractAudio(uint32_t* outSampleRate, uint32_t* outChannels,

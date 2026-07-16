@@ -49,6 +49,190 @@ static NSString* findFFmpeg(void) {
     return nil;
 }
 
+// Map BRAW gamma to AVFoundation transfer function for Resolve ACM auto-detection.
+// "Blackmagic Design Film" and "Blackmagic Design Video" both map closest to BT.709/BT.1886.
+static NSString* gammaToTransfer(const char* gamma) {
+    if (!gamma || !gamma[0]) return AVVideoTransferFunction_ITU_R_709_2;
+    return AVVideoTransferFunction_ITU_R_709_2;
+}
+
+// Map BRAW gamut + color science gen to color primaries.
+// "Blackmagic Wide Gamut" (Gen 5+) → BT.2020 primaries (closest standard wide gamut).
+// "Blackmagic Design" (Gen 4) → BT.709 primaries.
+static NSString* gamutToPrimaries(const char* gamut, uint16_t gen) {
+    if (gen >= 5) return AVVideoColorPrimaries_ITU_R_2020;
+    if (!gamut || !gamut[0]) return AVVideoColorPrimaries_ITU_R_709_2;
+    std::string g(gamut);
+    if (g.find("Wide") != std::string::npos) return AVVideoColorPrimaries_ITU_R_2020;
+    return AVVideoColorPrimaries_ITU_R_709_2;
+}
+
+// Map BRAW gamut + gen to YCbCr matrix. Must match primaries for correct RGB→YUV conversion.
+static NSString* gamutToMatrix(const char* gamut, uint16_t gen) {
+    if (gen >= 5) return AVVideoYCbCrMatrix_ITU_R_2020;
+    if (!gamut || !gamut[0]) return AVVideoYCbCrMatrix_ITU_R_709_2;
+    std::string g(gamut);
+    if (g.find("Wide") != std::string::npos) return AVVideoYCbCrMatrix_ITU_R_2020;
+    return AVVideoYCbCrMatrix_ITU_R_709_2;
+}
+
+// Write EXIF metadata into the MOV file using exiftool.
+// Resolve reads EXIF natively; this is the industry-standard approach
+// used by Panasonic, Sony, Canon, etc. in their MOV files.
+static void writeExifMetadata(const std::string& movPath, BrawClipHandle* clip, float fps) {
+    NSString* exiftool = @"/usr/local/bin/exiftool";
+    if (![[NSFileManager defaultManager] isExecutableFileAtPath:exiftool])
+        exiftool = @"/opt/homebrew/bin/exiftool";
+    if (![[NSFileManager defaultManager] isExecutableFileAtPath:exiftool]) {
+        fprintf(stderr, "EXIF: exiftool not found, skipping metadata\n");
+        return;
+    }
+
+    // Effective values (user override, else native)
+    uint32_t iso = braw_clip_get_iso(clip);
+    if (iso == 0) iso = braw_clip_get_native_iso(clip);
+    uint32_t wb = braw_clip_get_color_temp(clip);
+    if (wb == 0) wb = braw_clip_get_native_color_temp(clip);
+
+    NSMutableArray* args = [NSMutableArray arrayWithObjects:
+        @"-overwrite_original", @"-P", @"-m", nil];
+
+    // ── Standard EXIF tags (group prefix required so they go into EXIF, not XMP) ──
+    [args addObject:@"-EXIF:Make=Blackmagic Design"];
+    const char* ct = braw_clip_get_camera_type(clip);
+    if (ct && ct[0])
+        [args addObject:[NSString stringWithFormat:@"-EXIF:Model=%s", ct]];
+    if (iso > 0)
+        [args addObject:[NSString stringWithFormat:@"-EXIF:ISO=%u", iso]];
+    if (wb > 0)
+        [args addObject:[NSString stringWithFormat:@"-EXIF:ColorTemperature=%u", wb]];
+    [args addObject:@"-EXIF:ExposureProgram=Manual"];
+    [args addObject:@"-EXIF:Software=BrawTranscoder 1.0"];
+
+    // ── Free-form BRAW metadata → EXIF / XMP ──
+    int ffCount = braw_clip_get_metadata_count(clip);
+    for (int i = 0; i < ffCount; i++) {
+        const char* k = braw_clip_get_metadata_key(clip, i);
+        const char* v = braw_clip_get_metadata_value(clip, i);
+        if (!k || !k[0] || !v || !v[0]) continue;
+        if (strstr(v, "(unknown type)")) continue;
+        NSString* key = [NSString stringWithUTF8String:k];
+        NSString* val = [NSString stringWithUTF8String:v];
+
+        if ([key isEqualToString:@"lens_type"]) {
+            [args addObject:[NSString stringWithFormat:@"-EXIF:LensModel=%@", val]];
+            // Parse focal length from lens name (e.g. "LUMIX S 50/F1.8")
+            NSRange slash = [val rangeOfString:@"/" options:NSBackwardsSearch];
+            if (slash.location != NSNotFound && slash.location > 0) {
+                NSString* before = [val substringToIndex:slash.location];
+                NSCharacterSet* digits = [NSCharacterSet decimalDigitCharacterSet];
+                NSRange lastDigit = [before rangeOfCharacterFromSet:digits options:NSBackwardsSearch];
+                if (lastDigit.location != NSNotFound) {
+                    NSRange numStart = [before rangeOfCharacterFromSet:digits options:NSBackwardsSearch
+                        range:NSMakeRange(0, lastDigit.location + 1)];
+                    if (numStart.location != NSNotFound) {
+                        NSString* fl = [before substringWithRange:
+                            NSMakeRange(numStart.location, lastDigit.location - numStart.location + 1)];
+                        [args addObject:[NSString stringWithFormat:@"-EXIF:FocalLength=%@", fl]];
+                        [args addObject:[NSString stringWithFormat:@"-EXIF:FocalLengthIn35mmFormat=%@", fl]];
+                    }
+                }
+                // Parse aperture from after the slash — strip "F"/"f" prefix
+                NSString* after = [val substringFromIndex:slash.location + 1];
+                NSRange firstDigit = [after rangeOfCharacterFromSet:digits];
+                if (firstDigit.location != NSNotFound) {
+                    NSString* numStr = [after substringFromIndex:firstDigit.location];
+                    NSScanner* sc = [NSScanner scannerWithString:numStr];
+                    double ap = 0;
+                    if ([sc scanDouble:&ap] && ap > 0)
+                        [args addObject:[NSString stringWithFormat:@"-EXIF:FNumber=%g", ap]];
+                }
+            }
+        }
+        else if ([key isEqualToString:@"date_recorded"]) {
+            [args addObject:[NSString stringWithFormat:@"-EXIF:CreateDate=%@ 00:00:00", val]];
+        }
+        else if ([key isEqualToString:@"camera_id"]) {
+            [args addObject:[NSString stringWithFormat:@"-EXIF:SerialNumber=%@", val]];
+        }
+        else if ([key isEqualToString:@"firmware_version"]) {
+            [args addObject:[NSString stringWithFormat:@"-XMP:FirmwareVersion=%@", val]];
+        }
+        else if ([key isEqualToString:@"camera_number"]) {
+            [args addObject:[NSString stringWithFormat:@"-XMP:CameraNumber=%@", val]];
+        }
+        else if ([key isEqualToString:@"shutter_type"]) {
+            [args addObject:[NSString stringWithFormat:@"-XMP:ShutterType=%@", val]];
+        }
+        else if ([key isEqualToString:@"sensor_line_time"]) {
+            [args addObject:[NSString stringWithFormat:@"-XMP:SensorLineTime=%@", val]];
+        }
+        else if ([key isEqualToString:@"braw_compression_ratio"]) {
+            [args addObject:[NSString stringWithFormat:@"-XMP:BRAWCompressionRatio=%@", val]];
+        }
+        else if ([key isEqualToString:@"reel_name"]) {
+            [args addObject:[NSString stringWithFormat:@"-XMP:ReelName=%@", val]];
+        }
+        else if ([key isEqualToString:@"scene"]) {
+            [args addObject:[NSString stringWithFormat:@"-XMP:Scene=%@", val]];
+        }
+        else if ([key isEqualToString:@"take"]) {
+            [args addObject:[NSString stringWithFormat:@"-XMP:Take=%@", val]];
+        }
+        else if ([key isEqualToString:@"lens_distortion_correction_enable"] ||
+                 [key isEqualToString:@"lens_chromatic_aberration_correction_enable"] ||
+                 [key isEqualToString:@"lens_shading_enable"] ||
+                 [key isEqualToString:@"day_night"] ||
+                 [key isEqualToString:@"shot_type"]) {
+            [args addObject:[NSString stringWithFormat:@"-XMP:%@=%@", key, val]];
+        }
+    }
+
+    // ── Blackmagic color metadata as XMP custom namespace ──
+    const char* gammaS = braw_clip_get_gamma(clip);
+    const char* gamutS = braw_clip_get_gamut(clip);
+    uint16_t gen = braw_clip_get_color_science_gen(clip);
+    if (gammaS && gammaS[0])
+        [args addObject:[NSString stringWithFormat:@"-XMP:Gamma=%s", gammaS]];
+    if (gamutS && gamutS[0])
+        [args addObject:[NSString stringWithFormat:@"-XMP:Gamut=%s", gamutS]];
+    if (gen > 0)
+        [args addObject:[NSString stringWithFormat:@"-XMP:ColorScienceGen=%u", gen]];
+
+    // Tint and exposure from native settings
+    [args addObject:[NSString stringWithFormat:@"-XMP:Tint=%d",
+                     braw_clip_get_native_tint(clip)]];
+    [args addObject:[NSString stringWithFormat:@"-XMP:Exposure=%.2f",
+                     braw_clip_get_native_exposure(clip)]];
+
+    // Frame rate
+    [args addObject:[NSString stringWithFormat:@"-XMP:CameraFPS=%.3f", fps]];
+
+    [args addObject:[NSString stringWithUTF8String:movPath.c_str()]];
+
+    fprintf(stderr, "EXIF: writing metadata with exiftool...\n");
+    NSTask* task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:exiftool];
+    task.arguments = args;
+    NSPipe* errPipe = [NSPipe pipe];
+    task.standardError = errPipe;
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    NSError* err = nil;
+    [task launchAndReturnError:&err];
+    if (err) {
+        fprintf(stderr, "EXIF: launch failed: %s\n", [[err description] UTF8String]);
+        return;
+    }
+    [task waitUntilExit];
+    if (task.terminationStatus == 0) {
+        fprintf(stderr, "EXIF: metadata written successfully\n");
+    } else {
+        NSData* ed = [[errPipe fileHandleForReading] readDataToEndOfFile];
+        if (ed.length > 0) fprintf(stderr, "EXIF: %s\n",
+            [[[NSString alloc] initWithData:ed encoding:NSUTF8StringEncoding] UTF8String]);
+    }
+}
+
 static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                        uint64_t frameCount, int codec, int bitrate,
                        const std::string& outPath,
@@ -126,19 +310,51 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
             return false;
         }
 
-        // Video input
+        // ── Minimal QuickTime user data for file identification ──
+        {
+            NSMutableArray* metaItems = [NSMutableArray array];
+            AVMutableMetadataItem* make = [AVMutableMetadataItem metadataItem];
+            make.key = AVMetadataQuickTimeUserDataKeyMake;
+            make.keySpace = AVMetadataKeySpaceQuickTimeUserData;
+            make.value = @"Blackmagic Design";
+            [metaItems addObject:make];
+            const char* ct = braw_clip_get_camera_type(clip);
+            if (ct && ct[0]) {
+                AVMutableMetadataItem* model = [AVMutableMetadataItem metadataItem];
+                model.key = AVMetadataQuickTimeUserDataKeyModel;
+                model.keySpace = AVMetadataKeySpaceQuickTimeUserData;
+                model.value = [NSString stringWithUTF8String:ct];
+                [metaItems addObject:model];
+            }
+            writer.metadata = metaItems;
+        }
+
+        // Video input with color metadata for Resolve ACM auto-detection
+        const char* gammaStr = braw_clip_get_gamma(clip);
+        const char* gamutStr = braw_clip_get_gamut(clip);
+        uint16_t csGen = braw_clip_get_color_science_gen(clip);
+
+        NSString* primaries = gamutToPrimaries(gamutStr, csGen);
+        NSString* transfer = gammaToTransfer(gammaStr);
+        NSString* matrix = gamutToMatrix(gamutStr, csGen);
+
+        NSMutableDictionary* compressionProps = [NSMutableDictionary dictionaryWithDictionary:@{
+            AVVideoAverageBitRateKey: @(bitrate),
+            AVVideoMaxKeyFrameIntervalKey: @((int)(fps * 2)),
+            AVVideoProfileLevelKey: (codec == 0) ? AVVideoProfileLevelH264HighAutoLevel
+                                                   : @"HEVC_Main10_AutoLevel",
+            AVVideoAllowFrameReorderingKey: @NO,
+            AVVideoExpectedSourceFrameRateKey: @((int)fps),
+        }];
+        if (primaries) compressionProps[AVVideoColorPrimariesKey] = primaries;
+        if (transfer)  compressionProps[AVVideoTransferFunctionKey] = transfer;
+        if (matrix)    compressionProps[AVVideoYCbCrMatrixKey] = matrix;
+
         NSDictionary* vidSettings = @{
             AVVideoCodecKey: (codec == 0) ? AVVideoCodecTypeH264 : AVVideoCodecTypeHEVC,
             AVVideoWidthKey: @(outW),
             AVVideoHeightKey: @(outH),
-            AVVideoCompressionPropertiesKey: @{
-                AVVideoAverageBitRateKey: @(bitrate),
-                AVVideoMaxKeyFrameIntervalKey: @((int)(fps * 2)),
-                AVVideoProfileLevelKey: (codec == 0) ? AVVideoProfileLevelH264HighAutoLevel
-                                                       : @"HEVC_Main10_AutoLevel",
-                AVVideoAllowFrameReorderingKey: @NO,
-                AVVideoExpectedSourceFrameRateKey: @((int)fps),
-            },
+            AVVideoCompressionPropertiesKey: compressionProps,
         };
         AVAssetWriterInput* videoInput = [[AVAssetWriterInput alloc]
             initWithMediaType:AVMediaTypeVideo outputSettings:vidSettings];
@@ -314,6 +530,10 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
         if (!g_cancel) {
             [writer finishWritingWithCompletionHandler:^{}];
             while (writer.status == AVAssetWriterStatusWriting) usleep(50000);
+
+            if (writer.status == AVAssetWriterStatusCompleted) {
+                writeExifMetadata(outPath, clip, fps);
+            }
         }
 
         if (pxPool) CVPixelBufferPoolRelease(pxPool);
@@ -369,7 +589,7 @@ int braw_export_start_inprocess(BrawProjectHandle* proj, const int* indices, int
         std::string nm = braw_clip_get_filename(clip);
         size_t d = nm.rfind('.');
         if (d != std::string::npos) nm = nm.substr(0, d);
-        outPath = ods + "/" + nm + "_export.mov";
+        outPath = ods + "/" + nm + ".mov";
     }
 
     g_running=true; g_cancel=false;
@@ -424,7 +644,7 @@ int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                 } else {
                     outDir = [[NSString stringWithUTF8String:fpBuf] stringByDeletingLastPathComponent];
                 }
-                NSString* outPath = [outDir stringByAppendingPathComponent:[bn stringByAppendingString:@"_export.mov"]];
+                NSString* outPath = [outDir stringByAppendingPathComponent:[bn stringByAppendingString:@".mov"]];
                 if (!outPath) { fprintf(stderr, "Skipping project index %d: path construction failed\n", projectIdx); continue; }
 
                 uint32_t adjIso = braw_clip_get_iso(clip);

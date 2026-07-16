@@ -21,6 +21,12 @@ struct BrawClipHandle {
     std::string gamma;
     std::string gamut;
     uint16_t colorScienceGen = 0;
+    std::string cameraType;
+    uint32_t nativeISO = 0;
+    uint32_t nativeColorTemp = 5600;
+    int16_t  nativeTint = 0;
+    float    nativeExposure = 0.0f;
+    std::vector<std::pair<std::string, std::string>> freeFormMetadata;
     std::atomic<int> pendingOps{0};
 };
 
@@ -48,6 +54,16 @@ BrawClipHandle* braw_clip_open(const char* path) {
         h->gamma        = h->decoder->GetClipGamma();
         h->gamut        = h->decoder->GetClipGamut();
         h->colorScienceGen = h->decoder->GetColorScienceGen();
+        h->cameraType   = h->decoder->GetCameraType();
+        // Capture native camera settings (ISO, WB, tint, exposure)
+        h->decoder->CaptureNativeSettings();
+        h->nativeISO        = h->decoder->GetNativeISO();
+        h->nativeColorTemp  = h->decoder->GetNativeColorTemp();
+        h->nativeTint       = h->decoder->GetNativeTint();
+        h->nativeExposure   = h->decoder->GetNativeExposure();
+        // Read free-form metadata
+        auto ffm = h->decoder->GetFreeFormMetadata();
+        h->freeFormMetadata.assign(ffm.begin(), ffm.end());
     }
     h->decoder->Close();
     h->decoder.reset();
@@ -91,10 +107,34 @@ const char* braw_clip_get_filepath(BrawClipHandle* h) { return h ? h->filePath.c
 const char* braw_clip_get_gamma(BrawClipHandle* h)   { return h ? h->gamma.c_str() : ""; }
 const char* braw_clip_get_gamut(BrawClipHandle* h)   { return h ? h->gamut.c_str() : ""; }
 uint16_t  braw_clip_get_color_science_gen(BrawClipHandle* h) { return h ? h->colorScienceGen : 0; }
+const char* braw_clip_get_camera_type(BrawClipHandle* h) { return h ? h->cameraType.c_str() : ""; }
 uint32_t  braw_clip_get_width(BrawClipHandle* h)     { return h ? h->nativeWidth : 0; }
 uint32_t  braw_clip_get_height(BrawClipHandle* h)    { return h ? h->nativeHeight : 0; }
 float     braw_clip_get_frame_rate(BrawClipHandle* h){ return h ? h->frameRate : 0; }
 uint64_t  braw_clip_get_frame_count(BrawClipHandle* h){ return h ? h->frameCount : 0; }
+uint32_t braw_clip_get_native_iso(BrawClipHandle* h)        { return h ? h->nativeISO : 0; }
+uint32_t braw_clip_get_native_color_temp(BrawClipHandle* h) { return h ? h->nativeColorTemp : 0; }
+int16_t  braw_clip_get_native_tint(BrawClipHandle* h)       { return h ? h->nativeTint : 0; }
+float    braw_clip_get_native_exposure(BrawClipHandle* h)    { return h ? h->nativeExposure : 0.0f; }
+void     braw_clip_capture_native(BrawClipHandle* h) {
+    if (!h) return;
+    std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
+    braw_clip_ensure_decoder(h);
+    h->decoder->CaptureNativeSettings();
+    h->nativeISO       = h->decoder->GetNativeISO();
+    h->nativeColorTemp = h->decoder->GetNativeColorTemp();
+    h->nativeTint      = h->decoder->GetNativeTint();
+    h->nativeExposure  = h->decoder->GetNativeExposure();
+}
+int braw_clip_get_metadata_count(BrawClipHandle* h) { return h ? (int)h->freeFormMetadata.size() : 0; }
+const char* braw_clip_get_metadata_key(BrawClipHandle* h, int i) {
+    if (!h || i < 0 || i >= (int)h->freeFormMetadata.size()) return "";
+    return h->freeFormMetadata[i].first.c_str();
+}
+const char* braw_clip_get_metadata_value(BrawClipHandle* h, int i) {
+    if (!h || i < 0 || i >= (int)h->freeFormMetadata.size()) return "";
+    return h->freeFormMetadata[i].second.c_str();
+}
 
 // ── Adjustments ───────────────────────────────────
 
