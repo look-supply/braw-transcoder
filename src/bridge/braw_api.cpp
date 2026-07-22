@@ -61,6 +61,10 @@ BrawClipHandle* braw_clip_open(const char* path) {
         h->nativeColorTemp  = h->decoder->GetNativeColorTemp();
         h->nativeTint       = h->decoder->GetNativeTint();
         h->nativeExposure   = h->decoder->GetNativeExposure();
+        // Initialize adjustments with native values (so Swift reads correct defaults)
+        h->adjustments.iso        = h->nativeISO;
+        h->adjustments.colorTemp  = h->nativeColorTemp;
+        h->adjustments.tint       = h->nativeTint;
         // Read free-form metadata
         auto ffm = h->decoder->GetFreeFormMetadata();
         h->freeFormMetadata.assign(ffm.begin(), ffm.end());

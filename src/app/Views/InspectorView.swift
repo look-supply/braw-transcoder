@@ -36,6 +36,17 @@ struct InspectorContent: View {
     @ObservedObject var project: ProjectModel
     var isExporting: Bool { project.isExporting }
     
+    private var isoLabel: String {
+        switch clip.isoPresetIndex {
+        case 0:
+            return "\(clip.nativeISO) (Native)"
+        case 1...ClipModel.isoPresets.count:
+            return "\(ClipModel.isoPresets[clip.isoPresetIndex - 1])"
+        default:
+            return "Custom"
+        }
+    }
+    
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -43,27 +54,22 @@ struct InspectorContent: View {
                     VStack(alignment: .leading, spacing: 12) {
                         // ── ISO Preset Dropdown ──────────────
                         VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("ISO").font(.system(size: 10)).foregroundColor(.secondary)
-                                if clip.nativeISO > 0 {
-                                    Text("Native: \(clip.nativeISO)")
-                                        .font(.system(size: 9, design: .monospaced))
-                                        .foregroundColor(.secondary.opacity(0.6))
-                                }
-                            }
-                            Picker("ISO", selection: Binding<Int>(
+                            Text("ISO").font(.system(size: 10)).foregroundColor(.secondary)
+                            Picker(selection: Binding<Int>(
                                 get: { clip.isoPresetIndex },
                                 set: { clip.applyISOPreset($0) }
                             )) {
-                                ForEach(0..<ClipModel.isoPresetLabels.count, id: \.self) { i in
-                                    Text(ClipModel.isoPresetLabels[i]).tag(i)
+                                Text("\(clip.nativeISO) (Native)").tag(0)
+                                ForEach(0..<ClipModel.isoPresets.count, id: \.self) { i in
+                                    Text("\(ClipModel.isoPresets[i])").tag(i + 1)
                                 }
-                            }
+                                Text("Custom").tag(ClipModel.isoPresets.count + 1)
+                            } label: { EmptyView() }
                             .pickerStyle(.menu)
                             .frame(maxWidth: .infinity)
                             .disabled(isExporting)
                             
-                            if clip.isoPresetIndex < 0 || clip.isoPresetIndex >= ClipModel.isoPresets.count {
+                            if clip.isoPresetIndex == ClipModel.isoPresets.count + 1 || clip.isoPresetIndex < 0 {
                                 HStack {
                                     Text(String(format: "%.0f", Double(clip.iso)))
                                         .font(.system(size: 11, design: .monospaced))
@@ -77,18 +83,19 @@ struct InspectorContent: View {
                                 }
                             }
                         }
+                        .frame(maxWidth: .infinity)
                         
                         // ── Color Temp Preset Dropdown ───────
                         VStack(alignment: .leading, spacing: 4) {
                             Text("White Balance").font(.system(size: 10)).foregroundColor(.secondary)
-                            Picker("WB", selection: Binding<Int>(
+                            Picker(selection: Binding<Int>(
                                 get: { clip.colorPresetIndex },
                                 set: { clip.applyColorPreset($0) }
                             )) {
                                 ForEach(0..<ClipModel.colorPresetLabels.count, id: \.self) { i in
                                     Text(ClipModel.colorPresetLabels[i]).tag(i)
                                 }
-                            }
+                            } label: { EmptyView() }
                             .pickerStyle(.menu)
                             .frame(maxWidth: .infinity)
                             .disabled(isExporting)
@@ -96,29 +103,13 @@ struct InspectorContent: View {
                             let isAsShot = clip.colorPresetIndex == 0
                             let isCustomWB = clip.colorPresetIndex == ClipModel.colorPresetLabels.count - 1
                             
-                            if isAsShot {
-                                // Show native values as read-only labels
+                            if isAsShot || isCustomWB {
                                 VStack(spacing: 4) {
                                     HStack {
                                         Text("Temp").font(.system(size: 10)).foregroundColor(.secondary)
+                                        Spacer()
                                         Text("\(clip.colorTemp)K")
                                             .font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
-                                        Spacer()
-                                    }
-                                    HStack {
-                                        Text("Tint").font(.system(size: 10)).foregroundColor(.secondary)
-                                        Text("\(clip.tint)")
-                                            .font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
-                                        Spacer()
-                                    }
-                                }
-                            } else if isCustomWB {
-                                VStack(spacing: 4) {
-                                    HStack {
-                                        Text("Temp").font(.system(size: 10)).foregroundColor(.secondary)
-                                        Text("\(clip.colorTemp)K")
-                                            .font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
-                                        Spacer()
                                     }
                                     Slider(value: Binding<Double>(
                                         get: { Double(clip.colorTemp) },
@@ -128,9 +119,9 @@ struct InspectorContent: View {
                                     
                                     HStack {
                                         Text("Tint").font(.system(size: 10)).foregroundColor(.secondary)
+                                        Spacer()
                                         Text("\(clip.tint)")
                                             .font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
-                                        Spacer()
                                     }
                                     Slider(value: Binding<Double>(
                                         get: { Double(clip.tint) },
@@ -140,6 +131,7 @@ struct InspectorContent: View {
                                 }
                             }
                         }
+                        .frame(maxWidth: .infinity)
                         
                         // ── Exposure ─────────────────────────
                         VStack(alignment: .leading, spacing: 4) {
@@ -167,8 +159,10 @@ struct InspectorContent: View {
                         .foregroundColor(.accentColor)
                         .disabled(isExporting)
                     }
+                    .frame(maxWidth: .infinity)
                     .padding(.vertical, 4)
                 }
+                .frame(maxWidth: .infinity)
                 
                 GroupBox(label: Text("Highlight Recovery").font(.headline)) {
                     Toggle("Enable", isOn: $clip.highlightRecovery)

@@ -28,7 +28,24 @@ bundle_binaries() {
     echo "  binaries re-signed ✓"
 }
 
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [command]
+
+Commands:
+  build          Build the project (default)
+  clean          Remove the build directory
+  run            Build and launch the app
+  release        Build in Release mode
+  --help, -h     Show this help message
+EOF
+    exit 0
+}
+
 case "${1:-build}" in
+    --help|-h)
+        usage
+        ;;
     clean)
         echo "Cleaning build directory..."
         rm -rf "$BUILD_DIR"

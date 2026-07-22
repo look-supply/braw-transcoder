@@ -6,7 +6,7 @@ struct ContentView: View {
     var body: some View {
         HSplitView {
             SidebarView(project: project)
-                .frame(minWidth: 200, maxWidth: 350)
+                .frame(minWidth: 250, idealWidth: 250, maxWidth: 350)
                 .layoutPriority(1)
             
             VSplitView {
@@ -19,7 +19,7 @@ struct ContentView: View {
             .layoutPriority(2)
             
             InspectorView(project: project)
-                .frame(minWidth: 200, maxWidth: 350)
+                .frame(minWidth: 250, idealWidth: 250, maxWidth: 350)
                 .layoutPriority(1)
         }
         .background(Color(nsColor: .windowBackgroundColor))

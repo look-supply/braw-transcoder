@@ -177,6 +177,14 @@ final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
             nativeISO = _braw_clip_get_native_iso(h)
             nativeColorTemp = _braw_clip_get_native_color_temp(h)
             nativeTint = _braw_clip_get_native_tint(h)
+            // Match current ISO to dropdown index
+            if iso == nativeISO {
+                isoPresetIndex = 0
+            } else if let presetIdx = Self.isoPresets.firstIndex(of: iso) {
+                isoPresetIndex = presetIdx + 1
+            } else {
+                isoPresetIndex = -1
+            }
         }
         // Default to As Shot white balance
         if let h = handle {
@@ -251,8 +259,10 @@ final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
     }
     
     func applyISOPreset(_ index: Int) {
-        if index >= 0 && index < Self.isoPresets.count {
-            iso = Self.isoPresets[index]
+        if index == 0 {
+            iso = nativeISO
+        } else if index >= 1 && index <= Self.isoPresets.count {
+            iso = Self.isoPresets[index - 1]
         }
         isoPresetIndex = index
         schedulePreviewRefresh()
