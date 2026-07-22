@@ -86,6 +86,10 @@ void braw_project_clear(BrawProjectHandle* h);
 // ── Export API ──────────────────────────────────
 typedef void (*ExportProgressFn)(int clipIndex, int totalClips, int frameIndex, int totalFrames, void* ctx);
 
+// Segment size for subprocess-based export (each helper processes this many frames,
+// then exits — OS reclaims leaked BRAW SDK GPU memory).
+#define BRAW_EXPORT_SEGMENT_FRAMES 200
+
 int  braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                         int codec, int proResProfile, int resolutionMode, int dataRateMbps,
                         const char* outputDir,
@@ -94,6 +98,13 @@ int  braw_export_start_inprocess(BrawProjectHandle* proj, const int* indices, in
                                   int codec, int proResProfile, int resolutionMode, int dataRateMbps,
                                   const char* outputDir,
                                   ExportProgressFn progressFn, void* ctx);
+// Export a single frame range segment — used by export_helper subprocess.
+// Writes video+audio for frames [frameStart, frameEnd) to outputPath.
+int  braw_export_segment(BrawClipHandle* clip,
+                          int codec, int proResProfile, int resolutionMode, int dataRateMbps,
+                          const char* outputPath,
+                          uint64_t frameStart, uint64_t frameEnd,
+                          ExportProgressFn progressFn, void* ctx);
 void braw_export_cancel(void);
 int  braw_export_is_running(void);
 void braw_export_cleanup(void);

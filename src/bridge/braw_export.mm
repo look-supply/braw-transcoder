@@ -234,12 +234,19 @@ static void writeExifMetadata(const std::string& movPath, BrawClipHandle* clip, 
 }
 
 static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
-                       uint64_t frameCount, int codec, int bitrate,
+                       uint64_t frameStart, uint64_t frameEnd,
+                       int codec, int bitrate,
                        const std::string& outPath,
                        ExportProgressFn pf, void* pctx, int ci, int tc) {
+    fprintf(stderr, "EXPORT_MOV: enter out=%dx%d fps=%.2f range=[%llu,%llu) codec=%d bitrate=%d path=%s\n",
+            outW, outH, fps,
+            (unsigned long long)frameStart, (unsigned long long)frameEnd,
+            codec, bitrate, outPath.c_str());
     @autoreleasepool {
-        // Signal start — pf prints PROGRESS 0 to stdout, read live by parent
-        if (pf) pf(ci, tc, 0, (int)frameCount, pctx);
+        uint64_t segmentFrames = frameEnd - frameStart;
+        if (segmentFrames == 0) { fprintf(stderr, "EXPORT_MOV: zero frames\n"); return false; }
+
+        if (pf) { fprintf(stderr, "EXPORT_MOV: calling progress callback\n"); pf(ci, tc, (int)frameStart, (int)frameEnd, pctx); }
         uint32_t srcW = braw_clip_get_width(clip);
         uint32_t srcH = braw_clip_get_height(clip);
 
@@ -282,6 +289,17 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                 free(channelActive);
             }
         }
+
+        // Slice audio to this segment's frame range
+        uint64_t audioStartSample = 0;
+        uint64_t audioEndSample = audioSamples;
+        if (audioData && audioRate > 0 && fps > 0 && audioSamples > 0) {
+            audioStartSample = (uint64_t)((double)frameStart * (double)audioRate / (double)fps);
+            audioEndSample   = (uint64_t)((double)frameEnd   * (double)audioRate / (double)fps);
+            if (audioStartSample > audioSamples) audioStartSample = audioSamples;
+            if (audioEndSample > audioSamples) audioEndSample = audioSamples;
+        }
+        uint64_t segmentAudioSamples = (audioEndSample > audioStartSample) ? (audioEndSample - audioStartSample) : 0;
 
         // ---- Video + Audio via AVAssetWriter (direct to outPath) ----
         NSDictionary* poolAttrs = @{
@@ -371,7 +389,7 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
 
         // Audio input — 24-bit big-endian PCM (pcm_s24be, matches reference MOV)
         AVAssetWriterInput* audioInput = nil;
-        if (audioData && audioRate > 0 && audioSamples > 0) {
+        if (audioData && audioRate > 0 && segmentAudioSamples > 0) {
             NSDictionary* audioSettings = @{
                 AVFormatIDKey: @(kAudioFormatLinearPCM),
                 AVSampleRateKey: @(audioRate),
@@ -393,8 +411,7 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
         __block bool videoDone = false;
         __block bool audioDone = (audioInput == nil);
         __block bool inputFinished = false;
-        __block uint64_t frameIdx = 0;
-        static const int64_t CHUNK_SIZE = 200;
+        __block uint64_t frameIdx = frameStart;
 
         [videoInput requestMediaDataWhenReadyOnQueue:dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0)
                                           usingBlock:^{
@@ -402,13 +419,9 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                 bool origPreviewLUT = braw_clip_get_preview_lut(clip);
                 braw_clip_set_preview_lut(clip, false);
 
-                while (frameIdx < frameCount && !g_cancel && !inputFinished) {
-                    // Release and recreate decoder at chunk boundaries to clear
-                    // persistent GPU memory leaks in the BRAW SDK.
-                    if (frameIdx % CHUNK_SIZE == 0 && frameIdx > 0) {
-                        braw_clip_release_decoder(clip);
-                    }
-
+                // No decoder resets within a segment — each helper runs one
+                // decoder lifecycle, then exits. OS reclaims all leaked memory.
+                while (frameIdx < frameEnd && !g_cancel && !inputFinished) {
                     int fw = 0, fh = 0;
                     void* mtlBuf = braw_clip_decode_frame_gpu(clip, frameIdx, &fw, &fh);
                     if (!mtlBuf) { frameIdx++; continue; }
@@ -427,7 +440,8 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                         for (int y = 0; y < fh; y++)
                             memcpy(dst + y * dstBPR, src + y * fw * 4, fw * 4);
                         CVPixelBufferUnlockBaseAddress(pxBuf, 0);
-                        CMTime pts = CMTimeMake((int64_t)frameIdx, (int32_t)fps);
+                        // Segment-relative PTS so concat demuxer can sequence correctly
+                        CMTime pts = CMTimeMake((int64_t)(frameIdx - frameStart), (int32_t)fps);
                         @try {
                             [adaptor appendPixelBuffer:pxBuf withPresentationTime:pts];
                         } @catch (NSException* e) {
@@ -440,11 +454,12 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                         CVPixelBufferRelease(pxBuf);
                     }
                     braw_clip_free_frame_gpu(mtlBuf);
-                    if (pf) pf(ci, tc, (int)frameIdx, (int)frameCount, pctx);
+                    // Report global frame index for progress tracking
+                    if (pf) pf(ci, tc, (int)frameIdx, (int)(frameEnd - frameStart), pctx);
                     frameIdx++;
                 }
                 braw_clip_set_preview_lut(clip, origPreviewLUT);
-                if (frameIdx >= frameCount || g_cancel) {
+                if (frameIdx >= frameEnd || g_cancel) {
                     if (!inputFinished) {
                         [videoInput markAsFinished];
                         inputFinished = true;
@@ -455,7 +470,7 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
             }
         }];
 
-        // Audio — float to s24be (24-bit big-endian PCM)
+        // Audio — float to s24be (24-bit big-endian PCM), sliced to this segment
         if (audioInput && audioData) {
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
                 @autoreleasepool {
@@ -476,9 +491,9 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                         uint64_t samplesPerChunk = audioRate / (int)fps;
                         if (samplesPerChunk == 0) samplesPerChunk = 1024;
 
-                        for (uint64_t pos = 0; pos < audioSamples && !g_cancel; pos += samplesPerChunk) {
+                        for (uint64_t pos = audioStartSample; pos < audioEndSample && !g_cancel; pos += samplesPerChunk) {
                             if (!audioInput.readyForMoreMediaData) { usleep(1000); continue; }
-                            uint64_t chunk = std::min(samplesPerChunk, audioSamples - pos);
+                            uint64_t chunk = std::min(samplesPerChunk, audioEndSample - pos);
                             uint64_t numFloats = chunk * audioChannels;
                             uint64_t byteCount = numFloats * 3;
 
@@ -495,14 +510,14 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                                         if (f > 1.0f) f = 1.0f;
                                         if (f < -1.0f) f = -1.0f;
                                         int32_t sample = (int32_t)(f * 8388607.0f);
-                                        // Big-endian: high byte first
                                         dst[s * 3 + 0] = (uint8_t)(sample >> 16);
                                         dst[s * 3 + 1] = (uint8_t)(sample >> 8);
                                         dst[s * 3 + 2] = (uint8_t)(sample >> 0);
                                     }
                                 }
                                 CMSampleBufferRef sbuf = NULL;
-                                CMTime audioPts = CMTimeMake((int64_t)pos, (int32_t)audioRate);
+                                // Segment-relative audio PTS
+                                CMTime audioPts = CMTimeMake((int64_t)(pos - audioStartSample), (int32_t)audioRate);
                                 CMAudioSampleBufferCreateWithPacketDescriptions(kCFAllocatorDefault,
                                     blockBuf, true, NULL, NULL, audioFmtDesc,
                                     (CMItemCount)chunk, audioPts, NULL, &sbuf);
@@ -539,6 +554,63 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
         if (pxPool) CVPixelBufferPoolRelease(pxPool);
         return writer.status == AVAssetWriterStatusCompleted;
     }
+}
+
+// ── ffmpeg concat: merge segment MOV files into final output ────────────
+static bool runFFmpegConcat(const std::string& outputPath,
+                             const std::vector<std::string>& segments) {
+    if (segments.size() == 1) {
+        // Single segment — just rename
+        if (rename(segments[0].c_str(), outputPath.c_str()) != 0) {
+            fprintf(stderr, "CONCAT: rename %s -> %s failed\n", segments[0].c_str(), outputPath.c_str());
+            return false;
+        }
+        return true;
+    }
+
+    // Write concat file
+    char concatTmp[512];
+    snprintf(concatTmp, sizeof(concatTmp), "/tmp/braw_concat_%d_%d.txt", getpid(), rand());
+    FILE* listFile = fopen(concatTmp, "w");
+    if (!listFile) { fprintf(stderr, "CONCAT: failed to create %s\n", concatTmp); return false; }
+    for (const auto& seg : segments) {
+        fprintf(listFile, "file '%s'\n", seg.c_str());
+    }
+    fclose(listFile);
+
+    // Find ffmpeg
+    NSString* ffmpeg = findFFmpeg();
+    if (!ffmpeg) {
+        fprintf(stderr, "CONCAT: ffmpeg not found\n");
+        unlink(concatTmp);
+        return false;
+    }
+
+    // Run ffmpeg concat demuxer
+    NSString* outNS = [NSString stringWithUTF8String:outputPath.c_str()];
+    NSString* listNS = [NSString stringWithUTF8String:concatTmp];
+    NSTask* task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:ffmpeg];
+    task.arguments = @[@"-y", @"-f", @"concat", @"-safe", @"0",
+                        @"-i", listNS,
+                        @"-c", @"copy", @"-movflags", @"+faststart", outNS];
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    NSError* err = nil;
+    [task launchAndReturnError:&err];
+    if (err) {
+        fprintf(stderr, "CONCAT: launch failed: %s\n", [[err description] UTF8String]);
+        unlink(concatTmp);
+        return false;
+    }
+    [task waitUntilExit];
+    unlink(concatTmp);
+    bool ok = (task.terminationStatus == 0);
+    if (!ok) fprintf(stderr, "CONCAT: ffmpeg exit code %d\n", task.terminationStatus);
+
+    // Clean up segment files
+    for (const auto& seg : segments) unlink(seg.c_str());
+    return ok;
 }
 
 extern "C" {
@@ -597,12 +669,45 @@ int braw_export_start_inprocess(BrawProjectHandle* proj, const int* indices, int
         for (int ci=0; ci<count && !g_cancel; ci++) {
             auto* c = braw_project_get_clip(proj, indices[ci]);
             if (!c) continue;
-            exportMOV(c, ow, oh, fps, fc, codec, dataRateMbps*1000000, outPath, pf, ctx, ci, count);
+            uint64_t clipFrames = braw_clip_get_frame_count(c);
+            exportMOV(c, ow, oh, fps, 0, clipFrames, codec, dataRateMbps*1000000, outPath, pf, ctx, ci, count);
         }
         g_running=false;
         if (pf) pf(0,0,-1,-1,ctx);
     });
     return 0;
+}
+
+// Export a single frame range segment — called by export_helper subprocess.
+// Writes video+audio for frames [frameStart, frameEnd) to outputPath.
+int braw_export_segment(BrawClipHandle* clip,
+                         int codec, int proResProfile, int resolutionMode, int dataRateMbps,
+                         const char* outputPath,
+                         uint64_t frameStart, uint64_t frameEnd,
+                         ExportProgressFn pf, void* ctx) {
+    fprintf(stderr, "EXPORT_SEGMENT: enter clip=%p path=%s range=[%llu,%llu)\n",
+            (void*)clip, outputPath ? outputPath : "(null)",
+            (unsigned long long)frameStart, (unsigned long long)frameEnd);
+    if (!clip || !outputPath || frameStart >= frameEnd) {
+        fprintf(stderr, "EXPORT_SEGMENT: invalid args\n");
+        return -1;
+    }
+
+    uint32_t sw = braw_clip_get_width(clip);
+    uint32_t sh = braw_clip_get_height(clip);
+    float fps = braw_clip_get_frame_rate(clip);
+    int ow = (int)sw, oh = (int)sh;
+    int hs[] = {0, 2160, 2160, 1080, 1080};
+    if (resolutionMode > 0 && resolutionMode < 5 && hs[resolutionMode] > 0) {
+        oh = hs[resolutionMode];
+        ow = (int)((float)oh * sw / sh);
+        ow = (ow + 1) & ~1;
+    }
+
+    bool ok = exportMOV(clip, ow, oh, fps, frameStart, frameEnd,
+                         codec, dataRateMbps * 1000000,
+                         std::string(outputPath), pf, ctx, 0, 1);
+    return ok ? 0 : -1;
 }
 
 int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
@@ -612,22 +717,24 @@ int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
     NSString* helper = helperPath();
     if (!helper) { fprintf(stderr, "export_helper binary not found\n"); return -1; }
 
-    // Copy async-safe values — Swift's outputDir pointer dangles by the
-    // time the dispatch_async block executes.
     std::vector<int> indicesCopy(indices, indices + count);
     std::string outDirBase = (outputDir && outputDir[0]) ? outputDir : "";
 
     g_running=true; g_cancel=false;
+    fprintf(stderr, "EXPORT: starting export for %d clips\n", count);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         @autoreleasepool {
+            const uint64_t kSegFrames = BRAW_EXPORT_SEGMENT_FRAMES;
             const auto& idxVec = indicesCopy;
+
             for (int i=0; i<(int)idxVec.size() && !g_cancel; i++) {
                 int projectIdx = idxVec[i];
                 auto* clip = braw_project_get_clip(proj, projectIdx);
-                if (!clip) { fprintf(stderr, "clip null at project index %d\n", projectIdx); continue; }
+                if (!clip) { fprintf(stderr, "EXPORT: clip null at project index %d\n", projectIdx); continue; }
 
                 char fpBuf[1024];
                 snprintf(fpBuf, sizeof(fpBuf), "%s", braw_clip_get_filepath(clip));
+                fprintf(stderr, "EXPORT: processing clip %d: %s\n", projectIdx, fpBuf);
 
                 NSString* nb = [NSString stringWithUTF8String:fpBuf];
                 if (!nb) { fprintf(stderr, "Skipping project index %d: invalid UTF-8\n", projectIdx); continue; }
@@ -644,8 +751,9 @@ int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                 } else {
                     outDir = [[NSString stringWithUTF8String:fpBuf] stringByDeletingLastPathComponent];
                 }
-                NSString* outPath = [outDir stringByAppendingPathComponent:[bn stringByAppendingString:@".mov"]];
-                if (!outPath) { fprintf(stderr, "Skipping project index %d: path construction failed\n", projectIdx); continue; }
+                NSString* outPathBase = [outDir stringByAppendingPathComponent:[bn stringByAppendingString:@".mov"]];
+                if (!outPathBase) { fprintf(stderr, "Skipping project index %d: path construction failed\n", projectIdx); continue; }
+                std::string finalOutput = [outPathBase UTF8String];
 
                 uint32_t adjIso = braw_clip_get_iso(clip);
                 uint32_t adjCt  = braw_clip_get_color_temp(clip);
@@ -654,63 +762,136 @@ int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                 bool     adjHl   = braw_clip_get_highlight_recovery(clip);
                 bool     adjBl   = braw_clip_get_bake_lut(clip);
 
-                NSTask* task = [[NSTask alloc] init];
-                task.executableURL = [NSURL fileURLWithPath:helper];
-                task.arguments = @[nb, outPath,
-                    [NSString stringWithFormat:@"%d", codec],
-                    [NSString stringWithFormat:@"%d", proResProfile],
-                    [NSString stringWithFormat:@"%d", resolutionMode],
-                    [NSString stringWithFormat:@"%d", dataRateMbps],
-                    [NSString stringWithFormat:@"%u", adjIso],
-                    [NSString stringWithFormat:@"%u", adjCt],
-                    [NSString stringWithFormat:@"%d", adjTint],
-                    [NSString stringWithFormat:@"%f", adjExp],
-                    [NSString stringWithFormat:@"%d", adjHl ? 1 : 0],
-                    [NSString stringWithFormat:@"%d", adjBl ? 1 : 0]];
-                NSPipe* op = [NSPipe pipe];
-                NSPipe* ep = [NSPipe pipe];
-                task.standardOutput = op;
-                task.standardError = ep;
-                NSFileHandle* rh = [op fileHandleForReading];
-                NSFileHandle* eh = [(NSPipe*)task.standardError fileHandleForReading];
-
-                NSError* err = nil;
-                [task launchAndReturnError:&err];
-                if (err) { fprintf(stderr, "Launch failed: %s\n", [[err description] UTF8String]); continue; }
-
-                // Track the current task for cancellation
-                g_exportTask = task;
-
                 uint64_t totalFrames = braw_clip_get_frame_count(clip);
-                NSMutableData* buf = [[NSMutableData alloc] init];
-                while ([task isRunning] && !g_cancel) {
-                    NSData* chunk = [rh availableData];
-                    if (chunk.length == 0) break;
-                    [buf appendData:chunk];
-                    NSString* text = [[NSString alloc] initWithData:buf encoding:NSUTF8StringEncoding];
-                    for (NSString* line in [text componentsSeparatedByString:@"\n"]) {
-                        if ([line hasPrefix:@"PROGRESS"]) {
-                            int fi = 0;
-                            sscanf([line UTF8String], "PROGRESS %d", &fi);
-                            if (pf) pf(i, count, fi, (int)totalFrames, ctx);
-                        }
+                if (totalFrames == 0) { fprintf(stderr, "clip %d: zero frames, skipping\n", projectIdx); continue; }
+
+                // Build segment paths
+                uint64_t numSegments = (totalFrames + kSegFrames - 1) / kSegFrames;
+                fprintf(stderr, "EXPORT: clip %d: %llu frames, %llu segments (%llu each)\n",
+                        projectIdx, (unsigned long long)totalFrames,
+                        (unsigned long long)numSegments, (unsigned long long)kSegFrames);
+                std::vector<std::string> segmentPaths;
+                std::vector<bool> segmentOK(numSegments, false);
+                bool clipFailed = false;
+
+                for (uint64_t seg = 0; seg < numSegments && !g_cancel && !clipFailed; seg++) {
+                    fprintf(stderr, "EXPORT: launching segment %llu/%llu\n",
+                            (unsigned long long)seg, (unsigned long long)numSegments);
+                    uint64_t segStart = seg * kSegFrames;
+                    uint64_t segEnd = std::min(segStart + kSegFrames, totalFrames);
+
+                    char segPath[1024];
+                    snprintf(segPath, sizeof(segPath), "%s.seg_%03llu.mov",
+                             finalOutput.c_str(), (unsigned long long)seg);
+                    segmentPaths.push_back(std::string(segPath));
+
+                    NSString* segPathNS = [NSString stringWithUTF8String:segPath];
+                    NSTask* task = [[NSTask alloc] init];
+                    task.executableURL = [NSURL fileURLWithPath:helper];
+                    task.arguments = @[nb, segPathNS,
+                        [NSString stringWithFormat:@"%d", codec],
+                        [NSString stringWithFormat:@"%d", proResProfile],
+                        [NSString stringWithFormat:@"%d", resolutionMode],
+                        [NSString stringWithFormat:@"%d", dataRateMbps],
+                        [NSString stringWithFormat:@"%u", adjIso],
+                        [NSString stringWithFormat:@"%u", adjCt],
+                        [NSString stringWithFormat:@"%d", adjTint],
+                        [NSString stringWithFormat:@"%f", adjExp],
+                        [NSString stringWithFormat:@"%d", adjHl ? 1 : 0],
+                        [NSString stringWithFormat:@"%d", adjBl ? 1 : 0],
+                        [NSString stringWithFormat:@"%llu", (unsigned long long)segStart],
+                        [NSString stringWithFormat:@"%llu", (unsigned long long)segEnd]];
+
+                    NSPipe* op = [NSPipe pipe];
+                    task.standardOutput = op;
+                    // Send stderr to parent's stderr to avoid pipe buffer deadlocks
+                    task.standardError = [NSFileHandle fileHandleWithStandardError];
+                    NSFileHandle* rh = [op fileHandleForReading];
+
+                    NSError* err = nil;
+                    [task launchAndReturnError:&err];
+                    if (err) {
+                        fprintf(stderr, "Segment launch failed: %s\n", [[err description] UTF8String]);
+                        g_cancel = true;
+                        [task terminate];
+                        clipFailed = true;
+                        break;
                     }
-                    NSString* last = [[text componentsSeparatedByString:@"\n"] lastObject];
-                    buf = (last.length > 0)
-                        ? [[last dataUsingEncoding:NSUTF8StringEncoding] mutableCopy]
-                        : [[NSMutableData alloc] init];
+
+                    g_exportTask = task;
+
+                    // Read progress from helper stdout
+                    NSMutableData* buf = [[NSMutableData alloc] init];
+                    while ([task isRunning] && !g_cancel) {
+                        NSData* chunk = [rh availableData];
+                        if (chunk.length == 0) break;
+                        [buf appendData:chunk];
+                        NSString* text = [[NSString alloc] initWithData:buf encoding:NSUTF8StringEncoding];
+                        for (NSString* line in [text componentsSeparatedByString:@"\n"]) {
+                            if ([line hasPrefix:@"PROGRESS"]) {
+                                int fi = 0;
+                                sscanf([line UTF8String], "PROGRESS %d", &fi);
+                                // Report global frame index within the clip
+                                if (pf) pf(i, count, fi, (int)totalFrames, ctx);
+                            }
+                        }
+                        NSString* last = [[text componentsSeparatedByString:@"\n"] lastObject];
+                        buf = (last.length > 0)
+                            ? [[last dataUsingEncoding:NSUTF8StringEncoding] mutableCopy]
+                            : [[NSMutableData alloc] init];
+                    }
+
+                    if (g_cancel && [task isRunning]) [task terminate];
+                    [task waitUntilExit];
+                    g_exportTask = nil;
+
+                    if ([task terminationStatus] == 0) {
+                        fprintf(stderr, "Segment %llu/%llu OK\n",
+                                (unsigned long long)seg, (unsigned long long)numSegments);
+                        segmentOK[seg] = true;
+                    } else {
+                        fprintf(stderr, "Segment %llu/%llu FAILED (exit %d)\n",
+                                (unsigned long long)seg, (unsigned long long)numSegments,
+                                task.terminationStatus);
+                        clipFailed = true;
+                        break;
+                    }
+
                 }
-                if (g_cancel && [task isRunning]) [task terminate];
-                [task waitUntilExit];
-                g_exportTask = nil;
-                NSData* ed = [eh readDataToEndOfFile];
-                if (ed.length > 0) fprintf(stderr, "helper: %s\n", [[[NSString alloc] initWithData:ed encoding:NSUTF8StringEncoding] UTF8String]);
-                if ([task terminationStatus] == 0)
-                    fprintf(stderr, "Export OK: %s\n", [outPath UTF8String]);
-                else
-                    fprintf(stderr, "Export FAILED: %s\n", [outPath UTF8String]);
+
+                // ── Concatenate segments for this clip ──
+                if (!clipFailed && !g_cancel) {
+                    fprintf(stderr, "EXPORT: concatenating %llu segments for clip %d\n",
+                            (unsigned long long)numSegments, projectIdx);
+                    // Collect only successfully completed segments
+                    std::vector<std::string> goodSegments;
+                    for (uint64_t seg = 0; seg < numSegments; seg++) {
+                        if (segmentOK[seg]) goodSegments.push_back(segmentPaths[seg]);
+                    }
+                    if (goodSegments.empty()) {
+                        fprintf(stderr, "EXPORT: no segments to concatenate for clip %d\n", projectIdx);
+                        continue;
+                    }
+
+                    // Remove final output if it exists (concat will fail otherwise)
+                    unlink(finalOutput.c_str());
+
+                    bool concatOK = runFFmpegConcat(finalOutput, goodSegments);
+                    if (concatOK) {
+                        fprintf(stderr, "EXPORT: concat OK: %s\n", finalOutput.c_str());
+                        fprintf(stderr, "EXPORT: writing EXIF metadata...\n");
+                        float fps = braw_clip_get_frame_rate(clip);
+                        writeExifMetadata(finalOutput, clip, fps);
+                    } else {
+                        fprintf(stderr, "EXPORT: concat FAILED for clip %d\n", projectIdx);
+                    }
+                } else {
+                    // Clip failed or was cancelled — clean up any segments
+                    for (const auto& sp : segmentPaths) unlink(sp.c_str());
+                }
             }
-            // Safety kill: ensure no helper lingers
+
+            // Safety kill
             [g_exportTask terminate];
             [g_exportTask waitUntilExit];
             g_exportTask = nil;
