@@ -43,7 +43,14 @@ struct InspectorContent: View {
                     VStack(alignment: .leading, spacing: 12) {
                         // ── ISO Preset Dropdown ──────────────
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("ISO").font(.system(size: 10)).foregroundColor(.secondary)
+                            HStack {
+                                Text("ISO").font(.system(size: 10)).foregroundColor(.secondary)
+                                if clip.nativeISO > 0 {
+                                    Text("Native: \(clip.nativeISO)")
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundColor(.secondary.opacity(0.6))
+                                }
+                            }
                             Picker("ISO", selection: Binding<Int>(
                                 get: { clip.isoPresetIndex },
                                 set: { clip.applyISOPreset($0) }
@@ -86,7 +93,26 @@ struct InspectorContent: View {
                             .frame(maxWidth: .infinity)
                             .disabled(isExporting)
                             
-                            if clip.colorPresetIndex < 0 || clip.colorPresetIndex >= ClipModel.colorPresets.count {
+                            let isAsShot = clip.colorPresetIndex == 0
+                            let isCustomWB = clip.colorPresetIndex == ClipModel.colorPresetLabels.count - 1
+                            
+                            if isAsShot {
+                                // Show native values as read-only labels
+                                VStack(spacing: 4) {
+                                    HStack {
+                                        Text("Temp").font(.system(size: 10)).foregroundColor(.secondary)
+                                        Text("\(clip.colorTemp)K")
+                                            .font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
+                                        Spacer()
+                                    }
+                                    HStack {
+                                        Text("Tint").font(.system(size: 10)).foregroundColor(.secondary)
+                                        Text("\(clip.tint)")
+                                            .font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
+                                        Spacer()
+                                    }
+                                }
+                            } else if isCustomWB {
                                 VStack(spacing: 4) {
                                     HStack {
                                         Text("Temp").font(.system(size: 10)).foregroundColor(.secondary)

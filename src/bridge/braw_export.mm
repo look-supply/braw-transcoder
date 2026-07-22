@@ -8,6 +8,12 @@
 #include <dispatch/dispatch.h>
 #include <unistd.h>
 
+// File-based diagnostics (same file as Swift diag)
+#define DIAG(...) do { \
+    FILE* _d = fopen("/tmp/braw_diag.txt", "a"); \
+    if (_d) { fprintf(_d, "C: " __VA_ARGS__); fclose(_d); } \
+} while(0)
+
 static std::atomic<bool> g_running{false};
 static std::atomic<bool> g_cancel{false};
 
@@ -238,21 +244,20 @@ static bool exportMOV(BrawClipHandle* clip, int outW, int outH, float fps,
                        int codec, int bitrate,
                        const std::string& outPath,
                        ExportProgressFn pf, void* pctx, int ci, int tc) {
-    fprintf(stderr, "EXPORT_MOV: enter out=%dx%d fps=%.2f range=[%llu,%llu) codec=%d bitrate=%d path=%s\n",
-            outW, outH, fps,
-            (unsigned long long)frameStart, (unsigned long long)frameEnd,
-            codec, bitrate, outPath.c_str());
+    DIAG("exportMOV: enter range=[%llu,%llu) path=%s\n",
+         (unsigned long long)frameStart, (unsigned long long)frameEnd, outPath.c_str());
     @autoreleasepool {
         uint64_t segmentFrames = frameEnd - frameStart;
-        if (segmentFrames == 0) { fprintf(stderr, "EXPORT_MOV: zero frames\n"); return false; }
+        if (segmentFrames == 0) { DIAG("exportMOV: zero frames\n"); return false; }
 
-        if (pf) { fprintf(stderr, "EXPORT_MOV: calling progress callback\n"); pf(ci, tc, (int)frameStart, (int)frameEnd, pctx); }
+        if (pf) { DIAG("exportMOV: calling progress callback\n"); pf(ci, tc, (int)frameStart, (int)frameEnd, pctx); }
         uint32_t srcW = braw_clip_get_width(clip);
         uint32_t srcH = braw_clip_get_height(clip);
 
         // ---- Extract audio with channel pruning ----
         uint32_t audioRate = 0, audioChannels = 0;
         uint64_t audioSamples = 0;
+        DIAG("exportMOV: extracting audio...\n");
         float* audioData = braw_clip_extract_audio(clip, &audioRate, &audioChannels, &audioSamples);
         if (audioData && audioRate > 0 && audioSamples > 0) {
             bool* channelActive = (bool*)calloc(audioChannels, sizeof(bool));
@@ -713,8 +718,13 @@ int braw_export_segment(BrawClipHandle* clip,
 int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                        int codec, int proResProfile, int resolutionMode, int dataRateMbps,
                        const char* outputDir, ExportProgressFn pf, void* ctx) {
-    if (g_running || !proj || !indices || count<=0) return -1;
+    DIAG("braw_export_start: count=%d\n", count);
+    if (g_running || !proj || !indices || count<=0) {
+        DIAG("braw_export_start: g_running=%d proj=%p\n", g_running.load(), (void*)proj);
+        return -1;
+    }
     NSString* helper = helperPath();
+    DIAG("helperPath: %s\n", helper ? [helper UTF8String] : "nil");
     if (!helper) { fprintf(stderr, "export_helper binary not found\n"); return -1; }
 
     std::vector<int> indicesCopy(indices, indices + count);
@@ -775,8 +785,11 @@ int braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                 bool clipFailed = false;
 
                 for (uint64_t seg = 0; seg < numSegments && !g_cancel && !clipFailed; seg++) {
-                    fprintf(stderr, "EXPORT: launching segment %llu/%llu\n",
-                            (unsigned long long)seg, (unsigned long long)numSegments);
+                DIAG("launching segment %llu/%llu helper=%s\n",
+                     (unsigned long long)seg, (unsigned long long)numSegments,
+                     [helper UTF8String]);
+                fprintf(stderr, "EXPORT: launching segment %llu/%llu\n",
+                        (unsigned long long)seg, (unsigned long long)numSegments);
                     uint64_t segStart = seg * kSegFrames;
                     uint64_t segEnd = std::min(segStart + kSegFrames, totalFrames);
 

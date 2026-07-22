@@ -28,6 +28,9 @@ import Metal
 @_silgen_name("braw_clip_get_frame_count")  func _braw_clip_get_frame_count(_ h: OpaquePointer) -> UInt64
 @_silgen_name("braw_clip_get_iso")          func _braw_clip_get_iso(_ h: OpaquePointer) -> UInt32
 @_silgen_name("braw_clip_set_iso")          func _braw_clip_set_iso(_ h: OpaquePointer, _ v: UInt32)
+@_silgen_name("braw_clip_get_native_iso")   func _braw_clip_get_native_iso(_ h: OpaquePointer) -> UInt32
+@_silgen_name("braw_clip_get_native_color_temp") func _braw_clip_get_native_color_temp(_ h: OpaquePointer) -> UInt32
+@_silgen_name("braw_clip_get_native_tint")  func _braw_clip_get_native_tint(_ h: OpaquePointer) -> Int16
 @_silgen_name("braw_clip_get_color_temp")   func _braw_clip_get_color_temp(_ h: OpaquePointer) -> UInt32
 @_silgen_name("braw_clip_set_color_temp")   func _braw_clip_set_color_temp(_ h: OpaquePointer, _ v: UInt32)
 @_silgen_name("braw_clip_get_tint")         func _braw_clip_get_tint(_ h: OpaquePointer) -> Int16
@@ -61,7 +64,7 @@ struct FrameImage {
 
 // ── Swift model ──────────────────────────────────
 
-final class ClipModel: Identifiable, ObservableObject {
+final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
     let id: Int
     private var handle: OpaquePointer?
     
@@ -77,7 +80,7 @@ final class ClipModel: Identifiable, ObservableObject {
     @Published var exposure: Float = 0 {
         didSet { if let h = handle { _braw_clip_set_exposure(h, exposure) }; schedulePreviewRefresh() }
     }
-    @Published var highlightRecovery = false {
+    @Published var highlightRecovery = true {
         didSet { if let h = handle { _braw_clip_set_highlight_recovery(h, highlightRecovery) }; schedulePreviewRefresh() }
     }
     @Published var previewLUT = true {
@@ -111,6 +114,11 @@ final class ClipModel: Identifiable, ObservableObject {
     var gamut: String { _gamut }
     var colorScienceGen: UInt16 = 0
     
+    // Native camera metadata (read once on init, never changes)
+    var nativeISO: UInt32 = 0
+    var nativeColorTemp: UInt32 = 5600
+    var nativeTint: Int16 = 0
+    
     // Global decode queue — allow 3 concurrent decodes
     private static let decodeQueue = DispatchQueue(label: "com.braw.decode", qos: .userInitiated,
                                                     attributes: .concurrent)
@@ -119,7 +127,7 @@ final class ClipModel: Identifiable, ObservableObject {
     
     // Presets
     @Published var isoPresetIndex: Int = -1  // -1 = custom
-    @Published var colorPresetIndex: Int = -1 // -1 = custom
+    @Published var colorPresetIndex: Int = 0  // 0 = As Shot, 1-5 = preset, 6 = Custom
 
     // ISO presets (standard BRAW increments)
     static let isoPresets: [UInt32] = [
@@ -143,7 +151,8 @@ final class ClipModel: Identifiable, ObservableObject {
         ColorPreset(id: 3, name: "Tungsten",    temp: 2850, tint: 0),
         ColorPreset(id: 4, name: "Fluorescent", temp: 3800, tint: 21),
     ]
-    static let colorPresetLabels: [String] = colorPresets.map { $0.name } + ["Custom"]
+    // 0 = As Shot, 1-5 = presets, 6 = Custom
+    static let colorPresetLabels: [String] = ["As Shot"] + colorPresets.map { $0.name } + ["Custom"]
     
     init(id: Int, handle: OpaquePointer?) {
         self.id = id
@@ -164,8 +173,23 @@ final class ClipModel: Identifiable, ObservableObject {
             exposure = _braw_clip_get_exposure(h)
             highlightRecovery = _braw_clip_get_highlight_recovery(h)
             previewLUT = _braw_clip_get_preview_lut(h)
+            // Read native camera metadata
+            nativeISO = _braw_clip_get_native_iso(h)
+            nativeColorTemp = _braw_clip_get_native_color_temp(h)
+            nativeTint = _braw_clip_get_native_tint(h)
         }
-        // Don't auto-load thumbnail — loaded on-demand when visible in sidebar
+        // Default to As Shot white balance
+        if let h = handle {
+            colorTemp = _braw_clip_get_native_color_temp(h)
+            tint = _braw_clip_get_native_tint(h)
+            _braw_clip_set_color_temp(h, colorTemp)
+            _braw_clip_set_tint(h, tint)
+        }
+        // Default highlight recovery ON
+        if let h = handle, !highlightRecovery {
+            highlightRecovery = true
+            _braw_clip_set_highlight_recovery(h, true)
+        }
     }
     
     func ensureDecoder() {
@@ -235,8 +259,15 @@ final class ClipModel: Identifiable, ObservableObject {
     }
     
     func applyColorPreset(_ index: Int) {
-        if index >= 0 && index < Self.colorPresets.count {
-            let preset = Self.colorPresets[index]
+        guard let h = handle else { return }
+        if index == 0 {
+            // As Shot — restore native camera white balance
+            colorTemp = nativeColorTemp
+            tint = nativeTint
+            _braw_clip_set_color_temp(h, colorTemp)
+            _braw_clip_set_tint(h, tint)
+        } else if index >= 1 && index <= Self.colorPresets.count {
+            let preset = Self.colorPresets[index - 1]
             colorTemp = preset.temp
             tint = preset.tint
         }
@@ -247,18 +278,20 @@ final class ClipModel: Identifiable, ObservableObject {
     func resetAdjustments() {
         guard let h = handle else { return }
         iso = 800
-        colorTemp = 5600
-        tint = 0
         exposure = 0
-        highlightRecovery = false
+        highlightRecovery = true
         previewLUT = true
         bakeLUT = false
+        // Reset white balance to As Shot (native values)
+        colorTemp = nativeColorTemp
+        tint = nativeTint
+        colorPresetIndex = 0
         // Write defaults to engine
         _braw_clip_set_iso(h, iso)
         _braw_clip_set_color_temp(h, colorTemp)
         _braw_clip_set_tint(h, tint)
         _braw_clip_set_exposure(h, exposure)
-        _braw_clip_set_highlight_recovery(h, false)
+        _braw_clip_set_highlight_recovery(h, true)
         _braw_clip_set_preview_lut(h, true)
         _braw_clip_set_bake_lut(h, false)
         schedulePreviewRefresh()
@@ -319,7 +352,7 @@ struct StoredAdjustments {
     var colorPresetIndex: Int
 }
 
-final class ProjectModel: ObservableObject {
+final class ProjectModel: ObservableObject, @unchecked Sendable {
     var projectHandle: OpaquePointer?
     @Published var clipCount = 0
     @Published var selectedIndex = -1
@@ -330,6 +363,8 @@ final class ProjectModel: ObservableObject {
     
     init() {
         projectHandle = _braw_project_create()
+        // Startup marker — if this file exists, the new code is running
+        try? "ProjectModel.init() called\n".write(toFile: "/tmp/braw_diag.txt", atomically: true, encoding: .utf8)
     }
     
     deinit {
@@ -337,18 +372,44 @@ final class ProjectModel: ObservableObject {
         if let h = projectHandle { _braw_project_destroy(h) }
     }
     
+    // Temporary diagnostic helper — writes to /tmp/braw_diag.txt
+    private func diag(_ msg: String) {
+        let line = "DIAG: \(msg)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: "/tmp/braw_diag.txt") {
+                if let fh = FileHandle(forUpdatingAtPath: "/tmp/braw_diag.txt") {
+                    fh.seekToEndOfFile()
+                    fh.write(data)
+                    fh.closeFile()
+                }
+            } else {
+                FileManager.default.createFile(atPath: "/tmp/braw_diag.txt", contents: data)
+            }
+        }
+    }
+
     func importClip(path: String) -> Int {
-        guard let h = projectHandle else { return -1 }
+        guard let h = projectHandle else { diag("projectHandle nil"); return -1 }
+        diag("queueing \(path)")
+        let hBits = UInt(bitPattern: h)
         importQueue.async { [weak self] in
             guard let self = self else { return }
+            let h = OpaquePointer(bitPattern: hBits)!
+            self.diag("calling _braw_project_import...")
             let idx = _braw_project_import(h, path)
-            DispatchQueue.main.async {
-                let count = Int(_braw_project_get_clip_count(h))
+            self.diag("_braw_project_import returned \(idx)")
+            let count = Int(_braw_project_get_clip_count(h))
+            self.diag("clipCount=\(count), idx=\(idx)")
+            let finalIdx = Int(idx)
+            DispatchQueue.main.async { [weak self, finalIdx, count] in
+                guard let self = self else { return }
                 self.clipCount = count
-                let finalIdx = Int(idx)
                 if finalIdx >= 0 {
+                    self.diag("selecting clip \(finalIdx)")
                     if self.selectedIndex < 0 { self.selectedIndex = finalIdx }
                     self.selectClip(finalIdx)
+                } else {
+                    self.diag("import failed (idx < 0)")
                 }
             }
         }
@@ -427,7 +488,8 @@ final class ProjectModel: ObservableObject {
         clip.previewLUT = settings.previewLUT
         clip.bakeLUT = settings.bakeLUT
         clip.isoPresetIndex = settings.isoPresetIndex
-        clip.colorPresetIndex = settings.colorPresetIndex
+        // Pasted values are explicit adjustments — switch to Custom WB mode
+        clip.colorPresetIndex = ClipModel.colorPresetLabels.count - 1
     }
     
     func clearAllClips() {
@@ -461,6 +523,20 @@ final class ProjectModel: ObservableObject {
 // ── Export Manager ────────────────────────────────
 
 final class ExportManager: ObservableObject, @unchecked Sendable {
+    private func diag(_ msg: String) {
+        let line = "DIAG_EXPORT: \(msg)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: "/tmp/braw_diag.txt") {
+                if let fh = FileHandle(forUpdatingAtPath: "/tmp/braw_diag.txt") {
+                    fh.seekToEndOfFile()
+                    fh.write(data)
+                    fh.closeFile()
+                }
+            } else {
+                try? data.write(to: URL(fileURLWithPath: "/tmp/braw_diag.txt"))
+            }
+        }
+    }
     @Published var isExporting = false
     @Published var progress: Double = 0
     @Published var currentClipName = ""
@@ -476,7 +552,12 @@ final class ExportManager: ObservableObject, @unchecked Sendable {
     }
     
     func export(settings: ExportUISettings) {
-        guard !isExporting, let h = projectModel.projectHandle else { return }
+        self.diag("ExportManager.export() called with \(settings.selectedIndices.count) selected indices")
+        guard !isExporting, let h = projectModel.projectHandle else {
+            self.diag("export: isExporting=\(isExporting) or projectHandle nil")
+            return
+        }
+        self.diag("export: starting export")
         isExporting = true
         projectModel.isExporting = true
         progress = 0
@@ -485,6 +566,7 @@ final class ExportManager: ObservableObject, @unchecked Sendable {
             ? Array(0..<projectModel.clipCount)
             : settings.selectedIndices.sorted()
         totalClips = indices.count
+        self.diag("export: indices=\(indices), totalClips=\(totalClips)")
         
         guard !indices.isEmpty else { isExporting = false; return }
         
@@ -498,11 +580,12 @@ final class ExportManager: ObservableObject, @unchecked Sendable {
         let mgrVal = UInt(bitPattern: mgrPtr)
         let hVal = UInt(bitPattern: h)
         
+        self.diag("export: dispatching _braw_export_start on global queue")
         DispatchQueue.global(qos: .userInitiated).async { [mgrVal, hVal, cIndices, codec, profile, resMode, rate, outDir] in
             var mutableIndices = cIndices
             let projH = OpaquePointer(bitPattern: hVal)!
             let ctx = UnsafeMutableRawPointer(bitPattern: mgrVal)!
-            _ = _braw_export_start(
+            let ret = _braw_export_start(
                 projH,
                 &mutableIndices, Int32(mutableIndices.count),
                 codec, profile, resMode, rate,
@@ -529,6 +612,9 @@ final class ExportManager: ObservableObject, @unchecked Sendable {
                 },
                 ctx
             )
+            // Log export start result
+            let mgr2 = Unmanaged<ExportManager>.fromOpaque(ctx).takeUnretainedValue()
+            mgr2.diag("_braw_export_start returned \(ret)")
         }
     }
     
