@@ -1,8 +1,6 @@
 import Foundation
 import AppKit
 import CoreGraphics
-import Metal
-import Metal
 
 // ── C API declarations ────────────────────────────
 @_silgen_name("braw_project_create")        func _braw_project_create() -> OpaquePointer
@@ -41,22 +39,17 @@ import Metal
 @_silgen_name("braw_clip_set_highlight_recovery") func _braw_clip_set_highlight_recovery(_ h: OpaquePointer, _ v: Bool)
 @_silgen_name("braw_clip_get_preview_lut")  func _braw_clip_get_preview_lut(_ h: OpaquePointer) -> Bool
 @_silgen_name("braw_clip_set_preview_lut")  func _braw_clip_set_preview_lut(_ h: OpaquePointer, _ v: Bool)
-@_silgen_name("braw_clip_get_bake_lut")     func _braw_clip_get_bake_lut(_ h: OpaquePointer) -> Bool
-@_silgen_name("braw_clip_set_bake_lut")     func _braw_clip_set_bake_lut(_ h: OpaquePointer, _ v: Bool)
 @_silgen_name("braw_clip_decode_frame")     func _braw_clip_decode_frame(_ h: OpaquePointer, _ index: UInt64, _ w: UnsafeMutablePointer<Int32>, _ outH: UnsafeMutablePointer<Int32>) -> UnsafeMutablePointer<UInt8>?
+@_silgen_name("braw_clip_decode_frame_scaled") func _braw_clip_decode_frame_scaled(_ h: OpaquePointer, _ index: UInt64, _ w: UnsafeMutablePointer<Int32>, _ outH: UnsafeMutablePointer<Int32>, _ scale: Float) -> UnsafeMutablePointer<UInt8>?
 @_silgen_name("braw_clip_free_frame")        func _braw_clip_free_frame(_ data: UnsafeMutablePointer<UInt8>)
-@_silgen_name("braw_clip_decode_frame_gpu")  func _braw_clip_decode_frame_gpu(_ h: OpaquePointer, _ index: UInt64, _ w: UnsafeMutablePointer<Int32>, _ outH: UnsafeMutablePointer<Int32>) -> UnsafeMutableRawPointer?
-@_silgen_name("braw_clip_decode_frame_gpu_scaled") func _braw_clip_decode_frame_gpu_scaled(_ h: OpaquePointer, _ index: UInt64, _ w: UnsafeMutablePointer<Int32>, _ outH: UnsafeMutablePointer<Int32>, _ scale: Float) -> UnsafeMutableRawPointer?
-@_silgen_name("braw_clip_free_frame_gpu")    func _braw_clip_free_frame_gpu(_ ptr: UnsafeMutableRawPointer?)
 @_silgen_name("braw_clip_copy_adjustments")  func _braw_clip_copy_adjustments(_ src: OpaquePointer, _ dst: OpaquePointer)
-@_silgen_name("braw_clip_ensure_decoder")    func _braw_clip_ensure_decoder(_ h: OpaquePointer)
-@_silgen_name("braw_clip_release_decoder")   func _braw_clip_release_decoder(_ h: OpaquePointer)
+@_silgen_name("braw_diag_log")              func _braw_diag_log(_ msg: UnsafePointer<CChar>)
 @_silgen_name("braw_export_start")            func _braw_export_start(_ proj: OpaquePointer, _ indices: UnsafePointer<Int32>, _ count: Int32, _ codec: Int32, _ proResProfile: Int32, _ resolutionMode: Int32, _ dataRateMbps: Int32, _ outputDir: UnsafePointer<CChar>, _ progressFn: @convention(c) (Int32, Int32, Int32, Int32, UnsafeMutableRawPointer?) -> Void, _ ctx: UnsafeMutableRawPointer?) -> Int32
 @_silgen_name("braw_export_cancel")           func _braw_export_cancel()
 @_silgen_name("braw_export_is_running")       func _braw_export_is_running() -> Int32
-@_silgen_name("braw_export_cleanup")          func _braw_export_cleanup()
+@_silgen_name("braw_export_reset")            func _braw_export_reset()
 
-// ── Image data holder (bridge-safe) ────────────────
+// ── Image data holder ─────────────────────────────
 struct FrameImage {
     let cgImage: CGImage
     let nsImage: NSImage
@@ -67,7 +60,7 @@ struct FrameImage {
 final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
     let id: Int
     private var handle: OpaquePointer?
-    
+
     @Published var iso: UInt32 = 800 {
         didSet { if let h = handle { _braw_clip_set_iso(h, iso) }; schedulePreviewRefresh() }
     }
@@ -86,58 +79,53 @@ final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
     @Published var previewLUT = true {
         didSet { if let h = handle { _braw_clip_set_preview_lut(h, previewLUT) }; schedulePreviewRefresh() }
     }
-    @Published var bakeLUT = false {
-        didSet { if let h = handle { _braw_clip_set_bake_lut(h, bakeLUT) } }
-    }
     @Published var currentFrame: UInt64 = 0 {
         didSet { loadPreviewFrame() }
     }
-    
+
     @Published var thumbnail: NSImage? = nil
     @Published var preview: NSImage? = nil
     @Published var isLoadingPreview = false
-    
+
     private var loadRequestID: UInt64 = 0
     private var pendingRefresh: DispatchWorkItem?
-    
+
     private var _fileName: String = ""
     var fileName: String { _fileName }
-    
+
     private var _dirPath: String = ""
     var directoryPath: String { _dirPath }
     private var _filePath: String = ""
     var filePath: String { _filePath }
-    
+
     private var _gamma: String = ""
     var gamma: String { _gamma }
     private var _gamut: String = ""
     var gamut: String { _gamut }
     var colorScienceGen: UInt16 = 0
-    
-    // Native camera metadata (read once on init, never changes)
+
+    // Native camera metadata (read once on init)
     var nativeISO: UInt32 = 0
     var nativeColorTemp: UInt32 = 5600
     var nativeTint: Int16 = 0
-    
-    // Global decode queue — allow 3 concurrent decodes
+
+    // Decode queue — allow 3 concurrent decodes
     private static let decodeQueue = DispatchQueue(label: "com.braw.decode", qos: .userInitiated,
                                                     attributes: .concurrent)
     private static let decodeSem = DispatchSemaphore(value: 3)
     private var thumbnailLoaded = false
-    
-    // Presets
-    @Published var isoPresetIndex: Int = -1  // -1 = custom
-    @Published var colorPresetIndex: Int = 0  // 0 = As Shot, 1-5 = preset, 6 = Custom
 
-    // ISO presets (standard BRAW increments)
+    // Presets
+    @Published var isoPresetIndex: Int = -1
+    @Published var colorPresetIndex: Int = 0
+
     static let isoPresets: [UInt32] = [
         100, 125, 160, 200, 250, 320, 400, 500, 640,
         800, 1000, 1250, 1600, 2000, 2500, 3200, 4000,
         5000, 6400, 8000, 10000, 12800, 16000, 20000, 25600
     ]
     static let isoPresetLabels: [String] = isoPresets.map { "\($0)" } + ["Custom"]
-    
-    // Color temp presets
+
     struct ColorPreset: Identifiable {
         let id: Int
         let name: String
@@ -151,12 +139,12 @@ final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
         ColorPreset(id: 3, name: "Tungsten",    temp: 2850, tint: 0),
         ColorPreset(id: 4, name: "Fluorescent", temp: 3800, tint: 21),
     ]
-    // 0 = As Shot, 1-5 = presets, 6 = Custom
     static let colorPresetLabels: [String] = ["As Shot"] + colorPresets.map { $0.name } + ["Custom"]
-    
+
     init(id: Int, handle: OpaquePointer?) {
         self.id = id
         self.handle = handle
+        _braw_diag_log("ClipModel.init start")
         if let h = handle {
             _fileName = String(cString: _braw_clip_get_filename(h))
             let fullPath = String(cString: _braw_clip_get_filepath(h))
@@ -199,20 +187,12 @@ final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
             _braw_clip_set_highlight_recovery(h, true)
         }
     }
-    
-    func ensureDecoder() {
-        if let h = handle { _braw_clip_ensure_decoder(h) }
-    }
-    
-    func releaseDecoder() {
-        if let h = handle { _braw_clip_release_decoder(h) }
-    }
-    
+
     var nativeWidth: UInt32  { handle.map { _braw_clip_get_width($0) } ?? 0 }
     var nativeHeight: UInt32 { handle.map { _braw_clip_get_height($0) } ?? 0 }
     var frameRate: Float     { handle.map { _braw_clip_get_frame_rate($0) } ?? 0 }
     var frameCount: UInt64   { handle.map { _braw_clip_get_frame_count($0) } ?? 0 }
-    
+
     func applyToEngine() {
         guard let h = handle else { return }
         _braw_clip_set_iso(h, iso)
@@ -221,32 +201,31 @@ final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
         _braw_clip_set_exposure(h, exposure)
         _braw_clip_set_highlight_recovery(h, highlightRecovery)
         _braw_clip_set_preview_lut(h, previewLUT)
-        _braw_clip_set_bake_lut(h, bakeLUT)
     }
-    
+
     func loadThumbnail() {
-        guard let h = handle, !thumbnailLoaded else { return }
+        _braw_diag_log("loadThumbnail start")
+        guard let h = handle, !thumbnailLoaded else { _braw_diag_log("loadThumbnail skipped"); return }
         thumbnailLoaded = true
         Self.decodeQueue.async { [weak self] in
             guard self != nil else { return }
             Self.decodeSem.wait()
             defer { Self.decodeSem.signal() }
-            
+
             var w: Int32 = 0, outH: Int32 = 0
-            guard let mtlBufRaw = _braw_clip_decode_frame_gpu_scaled(h, 0, &w, &outH, 0.25) else { return }
-            let mtlBuf = unsafeBitCast(mtlBufRaw, to: MTLBuffer.self)
-            
-            let img = MetalRenderer.shared.makeNSImageFromMetalBufferReadback(mtlBuf, width: Int(w), height: Int(outH))
+            guard let pixels = _braw_clip_decode_frame_scaled(h, 0, &w, &outH, 0.25) else { return }
+
+            let img = makeNSImageBGRA(pixels: pixels, width: Int(w), height: Int(outH))
             let thumb = img.flatMap { resize($0, to: NSSize(width: 200, height: 112)) }
-            _braw_clip_free_frame_gpu(mtlBufRaw)
-            
+            _braw_clip_free_frame(pixels)
+
             DispatchQueue.main.async { [weak self] in
                 self?.thumbnail = thumb
                 self?.refreshAdjustmentsFromEngine()
             }
         }
     }
-    
+
     func refreshAdjustmentsFromEngine() {
         guard let h = handle else { return }
         iso = _braw_clip_get_iso(h)
@@ -255,9 +234,8 @@ final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
         exposure = _braw_clip_get_exposure(h)
         highlightRecovery = _braw_clip_get_highlight_recovery(h)
         previewLUT = _braw_clip_get_preview_lut(h)
-        bakeLUT = _braw_clip_get_bake_lut(h)
     }
-    
+
     func applyISOPreset(_ index: Int) {
         if index == 0 {
             iso = nativeISO
@@ -267,11 +245,10 @@ final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
         isoPresetIndex = index
         schedulePreviewRefresh()
     }
-    
+
     func applyColorPreset(_ index: Int) {
         guard let h = handle else { return }
         if index == 0 {
-            // As Shot — restore native camera white balance
             colorTemp = nativeColorTemp
             tint = nativeTint
             _braw_clip_set_color_temp(h, colorTemp)
@@ -284,62 +261,62 @@ final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
         colorPresetIndex = index
         schedulePreviewRefresh()
     }
-    
+
     func resetAdjustments() {
         guard let h = handle else { return }
         iso = 800
         exposure = 0
         highlightRecovery = true
         previewLUT = true
-        bakeLUT = false
-        // Reset white balance to As Shot (native values)
         colorTemp = nativeColorTemp
         tint = nativeTint
         colorPresetIndex = 0
-        // Write defaults to engine
         _braw_clip_set_iso(h, iso)
         _braw_clip_set_color_temp(h, colorTemp)
         _braw_clip_set_tint(h, tint)
         _braw_clip_set_exposure(h, exposure)
         _braw_clip_set_highlight_recovery(h, true)
         _braw_clip_set_preview_lut(h, true)
-        _braw_clip_set_bake_lut(h, false)
         schedulePreviewRefresh()
     }
-    
+
     func schedulePreviewRefresh() {
         pendingRefresh?.cancel()
         let work = DispatchWorkItem { [weak self] in
+            NSLog("PREVIEW: refresh fired for frame %llu", self?.currentFrame ?? 0)
             self?.loadPreviewFrame()
         }
         pendingRefresh = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
-    
+
     func loadPreviewFrame() {
-        guard let h = handle else { return }
+        _braw_diag_log("loadPreviewFrame enter")
+        guard let h = handle else { _braw_diag_log("loadPreviewFrame: no handle"); return }
         isLoadingPreview = true
         loadRequestID += 1
         let requestID = loadRequestID
         let frameIdx = currentFrame
-        
+
         Self.decodeQueue.async { [weak self] in
             guard let self = self else { return }
             Self.decodeSem.wait()
             defer { Self.decodeSem.signal() }
-            
+
             var w: Int32 = 0, outH: Int32 = 0
-            guard let mtlBufRaw = _braw_clip_decode_frame_gpu(h, frameIdx, &w, &outH) else {
+            guard let pixels = _braw_clip_decode_frame(h, frameIdx, &w, &outH) else {
+                NSLog("PREVIEW: decode_frame returned nil for frame %llu", frameIdx)
                 DispatchQueue.main.async {
                     if self.loadRequestID == requestID { self.isLoadingPreview = false }
                 }
                 return
             }
-            let mtlBuf = unsafeBitCast(mtlBufRaw, to: MTLBuffer.self)
-            
-            let img = MetalRenderer.shared.makeNSImageFromMetalBuffer(mtlBuf, width: Int(w), height: Int(outH))
-            _braw_clip_free_frame_gpu(mtlBufRaw)
-            
+
+            NSLog("PREVIEW: decoded %dx%d (%d bytes)", w, outH, Int(w) * Int(outH) * 4)
+            let img = makeNSImageBGRA(pixels: pixels, width: Int(w), height: Int(outH))
+            NSLog("PREVIEW: NSImage created: %@", img != nil ? "yes" : "nil")
+            _braw_clip_free_frame(pixels)
+
             DispatchQueue.main.async {
                 guard self.loadRequestID == requestID else { return }
                 self.preview = img
@@ -349,7 +326,7 @@ final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
     }
 }
 
-// ── Clipboard for copy/paste settings ──────────────
+// ── Clipboard ──────────────────────────────────────
 struct StoredAdjustments {
     var iso: UInt32
     var colorTemp: UInt32
@@ -357,7 +334,6 @@ struct StoredAdjustments {
     var exposure: Float
     var highlightRecovery: Bool
     var previewLUT: Bool
-    var bakeLUT: Bool
     var isoPresetIndex: Int
     var colorPresetIndex: Int
 }
@@ -370,73 +346,48 @@ final class ProjectModel: ObservableObject, @unchecked Sendable {
     @Published var copiedSettings: StoredAdjustments?
     private var clipCache: [Int: ClipModel] = [:]
     private let importQueue = DispatchQueue(label: "com.braw.import", qos: .userInitiated)
-    
+
     init() {
         projectHandle = _braw_project_create()
-        // Startup marker — if this file exists, the new code is running
         try? "ProjectModel.init() called\n".write(toFile: "/tmp/braw_diag.txt", atomically: true, encoding: .utf8)
     }
-    
+
     deinit {
         clipCache.removeAll()
         if let h = projectHandle { _braw_project_destroy(h) }
     }
-    
-    // Temporary diagnostic helper — writes to /tmp/braw_diag.txt
+
     private func diag(_ msg: String) {
-        let line = "DIAG: \(msg)\n"
-        if let data = line.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: "/tmp/braw_diag.txt") {
-                if let fh = FileHandle(forUpdatingAtPath: "/tmp/braw_diag.txt") {
-                    fh.seekToEndOfFile()
-                    fh.write(data)
-                    fh.closeFile()
-                }
-            } else {
-                FileManager.default.createFile(atPath: "/tmp/braw_diag.txt", contents: data)
-            }
-        }
+        // Minimal diagnostic logging
     }
 
     func importClip(path: String) -> Int {
-        guard let h = projectHandle else { diag("projectHandle nil"); return -1 }
-        diag("queueing \(path)")
+        guard let h = projectHandle else { return -1 }
         let hBits = UInt(bitPattern: h)
         importQueue.async { [weak self] in
             guard let self = self else { return }
             let h = OpaquePointer(bitPattern: hBits)!
-            self.diag("calling _braw_project_import...")
             let idx = _braw_project_import(h, path)
-            self.diag("_braw_project_import returned \(idx)")
             let count = Int(_braw_project_get_clip_count(h))
-            self.diag("clipCount=\(count), idx=\(idx)")
             let finalIdx = Int(idx)
             DispatchQueue.main.async { [weak self, finalIdx, count] in
                 guard let self = self else { return }
                 self.clipCount = count
                 if finalIdx >= 0 {
-                    self.diag("selecting clip \(finalIdx)")
                     if self.selectedIndex < 0 { self.selectedIndex = finalIdx }
                     self.selectClip(finalIdx)
-                } else {
-                    self.diag("import failed (idx < 0)")
                 }
             }
         }
         return 0
     }
-    
+
     func removeClip(at index: Int) {
         guard let h = projectHandle else { return }
-        // Release decoder before removing
-        if let clip = getClip(at: index) {
-            clip.releaseDecoder()
-        }
         clipCache.removeValue(forKey: index)
         _braw_project_remove(h, Int32(index))
         clipCount = Int(_braw_project_get_clip_count(h))
         selectedIndex = Int(_braw_project_get_selected_index(h))
-        // Rebuild cache with shifted indices
         var newCache: [Int: ClipModel] = [:]
         for (oldIdx, model) in clipCache {
             if oldIdx > index { newCache[oldIdx - 1] = model }
@@ -444,34 +395,26 @@ final class ProjectModel: ObservableObject, @unchecked Sendable {
         }
         clipCache = newCache
     }
-    
+
     func selectClip(_ index: Int) {
         guard let h = projectHandle else { return }
-        
-        if let prevClip = getClip(at: selectedIndex) {
-            prevClip.releaseDecoder()
-        }
-        
         _braw_project_set_selected_index(h, Int32(index))
         selectedIndex = index
-        
+
         if let clip = getClip(at: index) {
-            clip.ensureDecoder()
             clip.loadPreviewFrame()
         }
     }
-    
+
     func getClip(at index: Int) -> ClipModel? {
         guard let h = projectHandle, index >= 0, index < clipCount else { return nil }
-        if let cached = clipCache[index] {
-            return cached
-        }
+        if let cached = clipCache[index] { return cached }
         guard let ch = _braw_project_get_clip(h, Int32(index)) else { return nil }
         let model = ClipModel(id: index, handle: ch)
         clipCache[index] = model
         return model
     }
-    
+
     func copySettings(from index: Int) {
         guard let clip = getClip(at: index) else { return }
         copiedSettings = StoredAdjustments(
@@ -481,12 +424,11 @@ final class ProjectModel: ObservableObject, @unchecked Sendable {
             exposure: clip.exposure,
             highlightRecovery: clip.highlightRecovery,
             previewLUT: clip.previewLUT,
-            bakeLUT: clip.bakeLUT,
             isoPresetIndex: clip.isoPresetIndex,
             colorPresetIndex: clip.colorPresetIndex
         )
     }
-    
+
     func pasteSettings(to index: Int) {
         guard let settings = copiedSettings else { return }
         guard let clip = getClip(at: index) else { return }
@@ -496,23 +438,18 @@ final class ProjectModel: ObservableObject, @unchecked Sendable {
         clip.exposure = settings.exposure
         clip.highlightRecovery = settings.highlightRecovery
         clip.previewLUT = settings.previewLUT
-        clip.bakeLUT = settings.bakeLUT
         clip.isoPresetIndex = settings.isoPresetIndex
-        // Pasted values are explicit adjustments — switch to Custom WB mode
         clip.colorPresetIndex = ClipModel.colorPresetLabels.count - 1
     }
-    
+
     func clearAllClips() {
         guard let h = projectHandle else { return }
-        for clip in clipCache.values {
-            clip.releaseDecoder()
-        }
         clipCache.removeAll()
         _braw_project_clear(h)
         clipCount = 0
         selectedIndex = -1
     }
-    
+
     func applyClipSettingsToAll(from sourceIndex: Int) {
         guard let h = projectHandle else { return }
         guard let srcHandle = _braw_project_get_clip(h, Int32(sourceIndex)) else { return }
@@ -524,7 +461,7 @@ final class ProjectModel: ObservableObject, @unchecked Sendable {
             }
         }
     }
-    
+
     var selectedClip: ClipModel? {
         getClip(at: selectedIndex)
     }
@@ -533,20 +470,6 @@ final class ProjectModel: ObservableObject, @unchecked Sendable {
 // ── Export Manager ────────────────────────────────
 
 final class ExportManager: ObservableObject, @unchecked Sendable {
-    private func diag(_ msg: String) {
-        let line = "DIAG_EXPORT: \(msg)\n"
-        if let data = line.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: "/tmp/braw_diag.txt") {
-                if let fh = FileHandle(forUpdatingAtPath: "/tmp/braw_diag.txt") {
-                    fh.seekToEndOfFile()
-                    fh.write(data)
-                    fh.closeFile()
-                }
-            } else {
-                try? data.write(to: URL(fileURLWithPath: "/tmp/braw_diag.txt"))
-            }
-        }
-    }
     @Published var isExporting = false
     @Published var progress: Double = 0
     @Published var currentClipName = ""
@@ -554,32 +477,31 @@ final class ExportManager: ObservableObject, @unchecked Sendable {
     @Published var totalFrames: Int = 0
     @Published var clipIndex: Int = 0
     @Published var totalClips: Int = 0
-    
+
     private var projectModel: ProjectModel
-    
+
     init(project: ProjectModel) {
         self.projectModel = project
     }
-    
+
     func export(settings: ExportUISettings) {
-        self.diag("ExportManager.export() called with \(settings.selectedIndices.count) selected indices")
-        guard !isExporting, let h = projectModel.projectHandle else {
-            self.diag("export: isExporting=\(isExporting) or projectHandle nil")
-            return
-        }
-        self.diag("export: starting export")
+        NSLog("EXPORT_MGR: export() called with \(settings.selectedIndices.count) selected indices, isExporting=\(isExporting)")
+        _braw_diag_log("ExportManager.export() called")
+        // Force-reset C-side global state to clear any stuck previous export
+        _braw_export_reset()
+        
+        guard !isExporting else { _braw_diag_log("export: already exporting"); return }
+        guard let h = projectModel.projectHandle else { _braw_diag_log("export: no project handle"); return }
         isExporting = true
         projectModel.isExporting = true
         progress = 0
-        
+
         let indices = settings.selectedIndices.isEmpty
             ? Array(0..<projectModel.clipCount)
             : settings.selectedIndices.sorted()
         totalClips = indices.count
-        self.diag("export: indices=\(indices), totalClips=\(totalClips)")
-        
         guard !indices.isEmpty else { isExporting = false; return }
-        
+
         let cIndices = indices.map { Int32($0) }
         let codec = Int32(settings.codec)
         let profile = Int32(settings.proResProfile)
@@ -589,8 +511,7 @@ final class ExportManager: ObservableObject, @unchecked Sendable {
         let mgrPtr = Unmanaged.passUnretained(self).toOpaque()
         let mgrVal = UInt(bitPattern: mgrPtr)
         let hVal = UInt(bitPattern: h)
-        
-        self.diag("export: dispatching _braw_export_start on global queue")
+
         DispatchQueue.global(qos: .userInitiated).async { [mgrVal, hVal, cIndices, codec, profile, resMode, rate, outDir] in
             var mutableIndices = cIndices
             let projH = OpaquePointer(bitPattern: hVal)!
@@ -605,7 +526,6 @@ final class ExportManager: ObservableObject, @unchecked Sendable {
                     let mgr = Unmanaged<ExportManager>.fromOpaque(rawCtx).takeUnretainedValue()
                     DispatchQueue.main.async {
                         if frameIdx < 0 {
-                            _braw_export_cleanup()
                             mgr.isExporting = false
                             mgr.projectModel.isExporting = false
                             mgr.progress = 1.0
@@ -622,39 +542,46 @@ final class ExportManager: ObservableObject, @unchecked Sendable {
                 },
                 ctx
             )
-            // Log export start result
             let mgr2 = Unmanaged<ExportManager>.fromOpaque(ctx).takeUnretainedValue()
-            mgr2.diag("_braw_export_start returned \(ret)")
+            if ret != 0 {
+                DispatchQueue.main.async {
+                    mgr2.isExporting = false
+                    mgr2.projectModel.isExporting = false
+                    mgr2.progress = 0
+                    mgr2.currentFrame = 0
+                    mgr2.totalFrames = 0
+                }
+            }
         }
     }
-    
+
     func cancel() {
         _braw_export_cancel()
-        _braw_export_cleanup()
+        _braw_export_reset()
         isExporting = false
         projectModel.isExporting = false
     }
 }
 
 struct ExportUISettings {
-    var codec = 1           // 0=H264, 1=H265, 2=ProRes
-    var proResProfile = 3   // 0-5
-    var resolutionMode = 0  // 0=passthrough
+    var codec = 1
+    var proResProfile = 3
+    var resolutionMode = 0
     var dataRateMbps = 200
     var outputDir = ""
     var selectedIndices: [Int] = []
 }
 
-// ── Image helpers ─────────────────────────────────
+// ── Image helpers (CPU decode → NSImage) ──────────
 
-private func makeNSImage(pixels: UnsafeMutablePointer<UInt8>, width: Int, height: Int) -> NSImage? {
+private func makeNSImageBGRA(pixels: UnsafeMutablePointer<UInt8>, width: Int, height: Int) -> NSImage? {
     let bytesPerRow = width * 4
     let data = Data(bytes: pixels, count: bytesPerRow * height)
     guard let provider = CGDataProvider(data: data as CFData) else { return nil }
-    
+
     let bitmapInfo: UInt32 = CGImageAlphaInfo.premultipliedFirst.rawValue
         | CGBitmapInfo.byteOrder32Little.rawValue
-    
+
     guard let cg = CGImage(
         width: width, height: height,
         bitsPerComponent: 8, bitsPerPixel: 32,
@@ -666,7 +593,7 @@ private func makeNSImage(pixels: UnsafeMutablePointer<UInt8>, width: Int, height
         shouldInterpolate: true,
         intent: .defaultIntent
     ) else { return nil }
-    
+
     return NSImage(cgImage: cg, size: NSSize(width: width, height: height))
 }
 

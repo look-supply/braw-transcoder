@@ -155,6 +155,7 @@ struct ExportView: View {
     }
     
     func startExport(selectedOnly: Bool) {
+        NSLog("EXPORTVIEW: startExport selectedOnly=\(selectedOnly) clipCount=\(project.clipCount) selectedIndex=\(project.selectedIndex) isExporting=\(exportMgr.isExporting)")
         var settings = ExportUISettings()
         settings.codec = selectedCodec
         settings.proResProfile = selectedProResProfile
@@ -165,6 +166,6 @@ struct ExportView: View {
         exportMgr.export(settings: settings)
     }
     
-    func exportActiveClip() { startExport(selectedOnly: true) }
-    func exportAllClips() { startExport(selectedOnly: false) }
+    func exportActiveClip() { NSLog("EXPORTVIEW_BTN: exportActiveClip tapped"); startExport(selectedOnly: true) }
+    func exportAllClips() { NSLog("EXPORTVIEW_BTN: exportAllClips tapped"); startExport(selectedOnly: false) }
 }

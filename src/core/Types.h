@@ -88,7 +88,6 @@ struct ClipAdjustments {
     float    exposure    = 0.0f;
     bool     highlightRecovery = false;
     bool     previewLUT  = true;
-    bool     bakeLUT     = false;
 };
 
 struct ClipInfo {
@@ -122,10 +121,4 @@ inline int CalculateOutputWidth(int targetHeight, int nativeW, int nativeH) {
     return (w + 1) & ~1;
 }
 
-struct GradeParams {
-    float iso         = 1.0f;
-    float exposure    = 0.0f;
-    float colorTemp   = 6500.0f;
-    float tint        = 0.0f;
-    bool  highlightRecovery = false;
-};
+

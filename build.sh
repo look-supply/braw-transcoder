@@ -15,15 +15,7 @@ bundle_binaries() {
     else
         echo "  WARNING: ffmpeg binary not found at $FFMPEG_SRC"
     fi
-    if [ -f "$BUILD_DIR/export_helper" ]; then
-        mkdir -p "$APP_BUNDLE/Contents/MacOS"
-        cp "$BUILD_DIR/export_helper" "$APP_BUNDLE/Contents/MacOS/export_helper"
-        chmod +x "$APP_BUNDLE/Contents/MacOS/export_helper"
-        echo "  export_helper bundled ✓"
-    fi
-    # Re-sign bundled binaries — cp can corrupt code signatures,
-    # causing macOS to SIGKILL the process on launch
-    codesign -f -s - "$APP_BUNDLE/Contents/MacOS/export_helper" 2>/dev/null
+    # Re-sign bundled binary — cp can corrupt code signatures
     codesign -f -s - "$APP_BUNDLE/Contents/MacOS/ffmpeg" 2>/dev/null
     echo "  binaries re-signed ✓"
 }

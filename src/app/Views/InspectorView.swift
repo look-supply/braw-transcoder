@@ -171,13 +171,9 @@ struct InspectorContent: View {
                 }
                 
                 GroupBox(label: Text("LUT").font(.headline)) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Preview Embedded LUT", isOn: $clip.previewLUT)
-                            .disabled(isExporting)
-                        Toggle("Bake LUT into Output", isOn: $clip.bakeLUT)
-                            .disabled(isExporting || !clip.previewLUT)
-                    }
-                    .padding(.vertical, 2)
+                    Toggle("Preview Embedded LUT", isOn: $clip.previewLUT)
+                        .padding(.vertical, 2)
+                        .disabled(isExporting)
                 }
             }
             .padding(12)

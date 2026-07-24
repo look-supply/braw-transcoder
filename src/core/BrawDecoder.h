@@ -8,7 +8,9 @@
 
 class BrawDecoder {
 public:
-    using FrameCallback = std::function<void(void* metalBuffer, int width, int height, int bytesPerRow)>;
+    using FrameCallback = std::function<void(const uint8_t* pixels,
+                                              int width, int height,
+                                              int bytesPerRow)>;
 
     BrawDecoder();
     ~BrawDecoder();
@@ -24,38 +26,28 @@ public:
 
     std::vector<uint32_t> GetISOList();
 
+    // Decode a single frame synchronously. The callback receives CPU-side
+    // BGRA8 pixel data. Blocks until the frame is decoded.
     void RequestFrame(uint64_t frameIndex,
                       const ClipAdjustments& adjustments,
                       FrameCallback callback,
                       float scale = 1.0f);
 
-    // Synchronous decode returning CPU-side BGRA8 pixel data
+    // Synchronous decode returning a copy of the BGRA8 pixel data.
     std::vector<uint8_t> DecodeFrameSync(uint64_t frameIndex,
                                           int* outWidth, int* outHeight,
                                           int* outBytesPerRow,
                                           const ClipAdjustments& adjustments,
                                           float scale = 1.0f);
 
-    // Parallel CPU decode: submit count frames, decode across available cores.
-    // Returns pixel data in frame order. Blocks until all complete.
-    // count=0 defaults to number of CPU cores.
-    std::vector<std::vector<uint8_t>> DecodeFramesSyncBatch(
-        uint64_t startFrame, int count,
-        const ClipAdjustments& adjustments,
-        int* outWidth, int* outHeight, float scale = 1.0f);
-
-    // GPU decode: returns retained MTLBuffer on GPU (caller must CFRelease)
-    void* DecodeFrameGPU(uint64_t frameIndex,
-                          int* outWidth, int* outHeight,
-                          int* outBytesPerRow,
-                          const ClipAdjustments& adjustments);
-
-    // GPU decode at reduced scale: returns retained MTLBuffer (caller must CFRelease)
-    void* DecodeFrameGPUScaled(uint64_t frameIndex,
-                                int* outWidth, int* outHeight,
-                                int* outBytesPerRow,
-                                const ClipAdjustments& adjustments,
-                                float scale);
+    // Batch CPU decode for export. Decodes all frames in [startFrame, endFrame)
+    // using concurrent jobs across available CPU cores. Callbacks fire in frame
+    // order. Blocks until all frames complete.
+    // concurrency = 0 means auto-detect (CPU core count - 1).
+    void DecodeFramesCPUBatch(uint64_t startFrame, uint64_t endFrame,
+                               const ClipAdjustments& adjustments,
+                               FrameCallback callback,
+                               int concurrency = 0);
 
     // Capture native camera settings from frame 0
     void CaptureNativeSettings();
@@ -73,6 +65,27 @@ public:
     // Audio extraction: returns PCM float samples (caller frees with free())
     float* ExtractAudio(uint32_t* outSampleRate, uint32_t* outChannels,
                         uint64_t* outSampleCount);
+    // Audio format query: gets sample rate and channels without extracting audio.
+    bool   GetAudioFormat(uint32_t* outSampleRate, uint32_t* outChannels);
+
+    // Gyroscope / accelerometer data
+    struct GyroSample {
+        float timestamp;
+        float x, y, z;
+    };
+    struct GyroData {
+        std::vector<GyroSample> gyroscope;
+        std::vector<GyroSample> accelerometer;
+        float gyroSampleRate  = 0;
+        float accelSampleRate = 0;
+        float focalLength     = 0;
+        bool  hasGyro    = false;
+        bool  hasAccel   = false;
+    };
+    GyroData ExtractGyroData();
+
+    // Set pixel format for decode (must be called before OpenClip)
+    void SetOutputFormat(int format);  // 0=RGBAU8 (default), 1=RGBU16
 
     void FlushJobs();
 
