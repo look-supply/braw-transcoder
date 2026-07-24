@@ -12,6 +12,8 @@ typedef struct BrawProjectHandle BrawProjectHandle;
 // ── Clip API ──────────────────────────────────────
 BrawClipHandle* braw_clip_open(const char* path);
 void            braw_clip_close(BrawClipHandle* h);
+void            braw_clip_ensure_decoder(BrawClipHandle* h);
+void            braw_clip_release_decoder(BrawClipHandle* h);
 void            braw_clip_capture_native(BrawClipHandle* h);
 const char*     braw_clip_get_filename(BrawClipHandle* h);
 const char*     braw_clip_get_filepath(BrawClipHandle* h);

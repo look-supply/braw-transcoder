@@ -37,7 +37,7 @@ static bool exportClip(BrawClipHandle* clip, int,int,float fps,
     bd.CaptureNativeSettings();
     ClipAdjustments a; a.iso=braw_clip_get_iso(clip); a.colorTemp=braw_clip_get_color_temp(clip);
     a.tint=braw_clip_get_tint(clip); a.exposure=braw_clip_get_exposure(clip);
-    a.highlightRecovery=braw_clip_get_highlight_recovery(clip); a.previewLUT=false;
+    a.highlightRecovery=braw_clip_get_highlight_recovery(clip); a.previewLUT=true; // Required for correct CPU pipeline pixel output
 
     for(uint64_t i=fs;i<fe&&!g_cancel.load();i++){
         bd.RequestFrame(i,a,^(const uint8_t* p,int w,int h,int bpr){

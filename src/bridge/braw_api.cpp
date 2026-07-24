@@ -60,6 +60,10 @@ static void releaseDecoder(BrawClipHandle* h) {
     h->decoderOpen = false;
 }
 
+// Public API stubs
+void braw_clip_ensure_decoder(BrawClipHandle* h) { if(h) { std::lock_guard<std::recursive_mutex> lk(h->decoderMutex); ensureDecoder(h); } }
+void braw_clip_release_decoder(BrawClipHandle* h) { releaseDecoder(h); }
+
 // ── Clip API ──────────────────────────────────────
 
 BrawClipHandle* braw_clip_open(const char* path) {

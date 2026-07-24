@@ -43,6 +43,8 @@ import CoreGraphics
 @_silgen_name("braw_clip_decode_frame_scaled") func _braw_clip_decode_frame_scaled(_ h: OpaquePointer, _ index: UInt64, _ w: UnsafeMutablePointer<Int32>, _ outH: UnsafeMutablePointer<Int32>, _ scale: Float) -> UnsafeMutablePointer<UInt8>?
 @_silgen_name("braw_clip_free_frame")        func _braw_clip_free_frame(_ data: UnsafeMutablePointer<UInt8>)
 @_silgen_name("braw_clip_copy_adjustments")  func _braw_clip_copy_adjustments(_ src: OpaquePointer, _ dst: OpaquePointer)
+@_silgen_name("braw_clip_ensure_decoder")   func _braw_clip_ensure_decoder(_ h: OpaquePointer)
+@_silgen_name("braw_clip_release_decoder")  func _braw_clip_release_decoder(_ h: OpaquePointer)
 @_silgen_name("braw_diag_log")              func _braw_diag_log(_ msg: UnsafePointer<CChar>)
 @_silgen_name("braw_export_start")            func _braw_export_start(_ proj: OpaquePointer, _ indices: UnsafePointer<Int32>, _ count: Int32, _ codec: Int32, _ proResProfile: Int32, _ resolutionMode: Int32, _ dataRateMbps: Int32, _ outputDir: UnsafePointer<CChar>, _ progressFn: @convention(c) (Int32, Int32, Int32, Int32, UnsafeMutableRawPointer?) -> Void, _ ctx: UnsafeMutableRawPointer?) -> Int32
 @_silgen_name("braw_export_cancel")           func _braw_export_cancel()
@@ -193,6 +195,9 @@ final class ClipModel: Identifiable, ObservableObject, @unchecked Sendable {
     var frameRate: Float     { handle.map { _braw_clip_get_frame_rate($0) } ?? 0 }
     var frameCount: UInt64   { handle.map { _braw_clip_get_frame_count($0) } ?? 0 }
 
+    func ensureDecoder() { if let h = handle { _braw_clip_ensure_decoder(h) } }
+    func releaseDecoder() { if let h = handle { _braw_clip_release_decoder(h) } }
+    
     func applyToEngine() {
         guard let h = handle else { return }
         _braw_clip_set_iso(h, iso)
@@ -398,6 +403,12 @@ final class ProjectModel: ObservableObject, @unchecked Sendable {
 
     func selectClip(_ index: Int) {
         guard let h = projectHandle else { return }
+        
+        // Release decoder on previous clip to free SDK resources
+        if let prevClip = getClip(at: selectedIndex) {
+            prevClip.releaseDecoder()
+        }
+        
         _braw_project_set_selected_index(h, Int32(index))
         selectedIndex = index
 
