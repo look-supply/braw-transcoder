@@ -315,8 +315,9 @@ public:
             Variant v; VariantInit(&v); v.vt = blackmagicRawVariantTypeU16;
             v.uiVal = req.adjustments.highlightRecovery ? 1 : 0;
             clipAttrs->SetClipAttribute(blackmagicRawClipProcessingAttributeHighlightRecovery, &v); VariantClear(&v);
-            if (req.adjustments.previewLUT) {
-                VariantInit(&v); v.vt = blackmagicRawVariantTypeString; v.bstrVal = CFSTR("Embedded");
+            {
+                VariantInit(&v); v.vt = blackmagicRawVariantTypeString;
+                v.bstrVal = req.adjustments.previewLUT ? CFSTR("Embedded") : CFSTR("");
                 clipAttrs->SetClipAttribute(blackmagicRawClipProcessingAttributePost3DLUTMode, &v); VariantClear(&v);
             }
         }
