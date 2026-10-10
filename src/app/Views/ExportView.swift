@@ -7,7 +7,7 @@ struct ExportView: View {
     @State private var selectedProResProfile = 3
     @State private var selectedResolution = 0
     @State private var selectedDataRate = 4
-    @State private var outputDir = ""
+    @AppStorage("exportOutputDirectory") private var outputDir = ""
     
     init(project: ProjectModel) {
         self.project = project
@@ -157,6 +157,9 @@ struct ExportView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.prompt = "Select"
+        if !outputDir.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: (outputDir as NSString).expandingTildeInPath)
+        }
         if panel.runModal() == .OK { outputDir = panel.url?.path ?? "" }
     }
     

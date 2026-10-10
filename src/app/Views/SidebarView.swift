@@ -5,6 +5,7 @@ struct SidebarView: View {
     @ObservedObject var project: ProjectModel
     @State private var selectedIndices: Set<Int> = []
     @State private var keyMonitor: Any?
+    @State private var isDropTargeted = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -79,6 +80,19 @@ struct SidebarView: View {
                     }
                 }
             }
+            .overlay {
+                if project.clipCount == 0 {
+                    VStack(spacing: 8) {
+                        Image(systemName: "tray.and.arrow.down")
+                            .font(.title2)
+                        Text("Drop BRAW files here")
+                        Text("or use + to import")
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.secondary)
+                    .allowsHitTesting(false)
+                }
+            }
             .background(
                 Group {
                     Button("") { copyActiveClipSettings() }
@@ -89,6 +103,20 @@ struct SidebarView: View {
                 .opacity(0)
                 .frame(width: 1, height: 1)
             )
+        }
+        .contentShape(Rectangle())
+        .dropDestination(for: URL.self) { urls, _ in
+            importURLs(urls)
+        } isTargeted: { targeted in
+            isDropTargeted = targeted
+        }
+        .overlay {
+            if isDropTargeted && !project.isExporting && !project.isImporting {
+                Rectangle()
+                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                    .background(Color.accentColor.opacity(0.08))
+                    .allowsHitTesting(false)
+            }
         }
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -115,12 +143,19 @@ struct SidebarView: View {
             panel.allowedContentTypes = [brawType, UTType.data].compactMap { $0 }
         }
         if panel.runModal() == .OK {
-            for url in panel.urls {
-                if url.pathExtension.lowercased() == "braw" {
-                    _ = project.importClip(path: url.path)
-                }
-            }
+            _ = importURLs(panel.urls)
         }
+    }
+
+    @discardableResult
+    func importURLs(_ urls: [URL]) -> Bool {
+        guard !project.isExporting, !project.isImporting else { return false }
+        let clips = urls.filter { $0.isFileURL && $0.pathExtension.lowercased() == "braw" }
+        guard !clips.isEmpty else { return false }
+        for url in clips {
+            _ = project.importClip(path: url.path)
+        }
+        return true
     }
     
     var multiSelectedIndices: [Int] {
@@ -161,6 +196,11 @@ struct ClipRowView: View {
     @ObservedObject var clip: ClipModel
     let isActive: Bool
     let isSelected: Bool
+
+    private var thumbnailAspectRatio: CGFloat {
+        guard clip.nativeWidth > 0, clip.nativeHeight > 0 else { return 16.0 / 9.0 }
+        return CGFloat(clip.nativeWidth) / CGFloat(clip.nativeHeight)
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -177,18 +217,11 @@ struct ClipRowView: View {
                     .fill(isActive
                         ? Color.accentColor.opacity(0.12)
                         : Color.black.opacity(0.22))
-                    .frame(height: 90)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5)
-                            .stroke(isActive ? Color.accentColor : isSelected ? Color.secondary : Color.clear, lineWidth: 2)
-                    )
                 
                 if let thumb = clip.thumbnail {
                     Image(nsImage: thumb)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(height: 90)
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                        .aspectRatio(contentMode: .fit)
                 } else {
                     VStack(spacing: 4) {
                         ProgressView().scaleEffect(0.7)
@@ -212,6 +245,12 @@ struct ClipRowView: View {
                         Spacer()
                     }
                 }
+            }
+            .aspectRatio(thumbnailAspectRatio, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay {
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(isActive ? Color.accentColor : isSelected ? Color.secondary : Color.clear, lineWidth: 2)
             }
             
             // Metadata
