@@ -19,12 +19,12 @@ struct SidebarView: View {
                     Button(action: { project.clearAllClips(); selectedIndices.removeAll() }) {
                         Image(systemName: "trash")
                     }.help("Clear all clips")
-                    .disabled(project.isExporting)
+                    .disabled((project.isExporting || project.isImporting))
                 }
                 Button(action: importFiles) {
                     Image(systemName: "plus")
                 }.help("Import BRAW files")
-                .disabled(project.isExporting)
+                .disabled((project.isExporting || project.isImporting))
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             
@@ -41,7 +41,7 @@ struct SidebarView: View {
                                 .contentShape(Rectangle())
                                 .onAppear { clip.loadThumbnail() }
                                 .onTapGesture {
-                                    guard !project.isExporting else { return }
+                                    guard !(project.isExporting || project.isImporting) else { return }
                                     if NSEvent.modifierFlags.contains(.command) {
                                         if selectedIndices.contains(index) {
                                             selectedIndices.remove(index)
@@ -128,7 +128,7 @@ struct SidebarView: View {
     }
     
     func deleteSelectedClips() {
-        guard !project.isExporting, !selectedIndices.isEmpty else { return }
+        guard !(project.isExporting || project.isImporting), !selectedIndices.isEmpty else { return }
         let sorted = selectedIndices.sorted(by: >)
         for idx in sorted {
             project.removeClip(at: idx)
@@ -137,7 +137,7 @@ struct SidebarView: View {
     }
     
     func copyActiveClipSettings() {
-        guard !project.isExporting else { return }
+        guard !(project.isExporting || project.isImporting) else { return }
         let sourceIndex: Int
         if selectedIndices.count == 1, let only = selectedIndices.first {
             sourceIndex = only
@@ -149,7 +149,7 @@ struct SidebarView: View {
     }
     
     func pasteToSelectedClips() {
-        guard !project.isExporting, !selectedIndices.isEmpty else { return }
+        guard !(project.isExporting || project.isImporting), !selectedIndices.isEmpty else { return }
         guard project.copiedSettings != nil else { return }
         for idx in selectedIndices {
             project.pasteSettings(to: idx)

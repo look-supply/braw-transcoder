@@ -6,6 +6,7 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <mach/mach.h>
 
 struct BrawClipHandle {
     std::unique_ptr<BrawDecoder> decoder;
@@ -16,6 +17,7 @@ struct BrawClipHandle {
     float    frameRate    = 0;
     uint64_t frameCount   = 0;
     std::recursive_mutex decoderMutex;
+    std::mutex settingsMutex;
     std::string gamma;
     std::string gamut;
     uint16_t colorScienceGen = 0;
@@ -25,7 +27,8 @@ struct BrawClipHandle {
     int16_t  nativeTint = 0;
     float    nativeExposure = 0.0f;
     std::vector<std::pair<std::string, std::string>> freeFormMetadata;
-    std::atomic<int> pendingOps{0};
+    std::atomic<unsigned> refs{1};
+    std::string lastError;
     bool decoderOpen = false;
 };
 
@@ -44,7 +47,7 @@ static std::atomic<bool> g_exportGyro{false};
 // ── Internal helpers ─────────────────────────────
 
 static void ensureDecoder(BrawClipHandle* h) {
-    if (!h || h->decoderOpen) return;
+    if (!h) return;
     std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
     if (h->decoderOpen) return;
     if (!h->decoder) h->decoder = std::make_unique<BrawDecoder>();
@@ -54,7 +57,7 @@ static void ensureDecoder(BrawClipHandle* h) {
 }
 
 static void releaseDecoder(BrawClipHandle* h) {
-    if (!h || !h->decoderOpen) return;
+    if (!h) return;
     std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
     if (h->decoder) { h->decoder->Close(); h->decoder.reset(); }
     h->decoderOpen = false;
@@ -67,6 +70,7 @@ void braw_clip_release_decoder(BrawClipHandle* h) { releaseDecoder(h); }
 // ── Clip API ──────────────────────────────────────
 
 BrawClipHandle* braw_clip_open(const char* path) {
+    if (!path || !path[0]) return nullptr;
     auto* h = new BrawClipHandle();
     h->filePath = path;
     h->adjustments = {};
@@ -94,16 +98,28 @@ BrawClipHandle* braw_clip_open(const char* path) {
         auto ffm = h->decoder->GetFreeFormMetadata();
         h->freeFormMetadata.assign(ffm.begin(), ffm.end());
     }
+    if (!h->nativeWidth) { fprintf(stderr,"Import failed: %s\n",h->decoder->LastError().c_str()); delete h; return nullptr; }
     h->decoder->Close();
     h->decoderOpen = false;
     return h;
 }
 
 void braw_clip_close(BrawClipHandle* h) {
-    if (!h) return;
+    if (!h || h->refs.fetch_sub(1) != 1) return;
     { std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
       if (h->decoder) h->decoder->Close(); }
     delete h;
+}
+
+void braw_clip_retain(BrawClipHandle* h) { if(h) ++h->refs; }
+const char* braw_clip_last_error(BrawClipHandle* h) {
+    static thread_local std::string error;
+    if(!h) return "Clip is unavailable";
+    std::lock_guard lock(h->decoderMutex); error=h->lastError;return error.c_str();
+}
+BrawClipSettings braw_clip_get_settings(BrawClipHandle* h) {
+    if(!h)return {}; std::lock_guard lock(h->settingsMutex);
+    auto a=h->adjustments;return {a.iso,a.colorTemp,a.tint,a.exposure,a.highlightRecovery,a.previewLUT};
 }
 
 void braw_clip_capture_native(BrawClipHandle* h) {
@@ -150,19 +166,19 @@ const char* braw_clip_get_metadata_value(BrawClipHandle* h, int i) {
 
 // ── Adjustments ───────────────────────────────────
 
-uint32_t braw_clip_get_iso(BrawClipHandle* h)               { return h ? h->adjustments.iso : 0; }
-void braw_clip_set_iso(BrawClipHandle* h, uint32_t v)       { if (h) h->adjustments.iso = v; }
-uint32_t braw_clip_get_color_temp(BrawClipHandle* h)         { return h ? h->adjustments.colorTemp : 0; }
-void braw_clip_set_color_temp(BrawClipHandle* h, uint32_t v) { if (h) h->adjustments.colorTemp = v; }
-int16_t  braw_clip_get_tint(BrawClipHandle* h)               { return h ? h->adjustments.tint : 0; }
-void braw_clip_set_tint(BrawClipHandle* h, int16_t v)       { if (h) h->adjustments.tint = v; }
-float    braw_clip_get_exposure(BrawClipHandle* h)           { return h ? h->adjustments.exposure : 0; }
-void braw_clip_set_exposure(BrawClipHandle* h, float v)     { if (h) h->adjustments.exposure = v; }
-bool braw_clip_get_highlight_recovery(BrawClipHandle* h)     { return h ? h->adjustments.highlightRecovery : false; }
-void braw_clip_set_highlight_recovery(BrawClipHandle* h, bool v) { if (h) h->adjustments.highlightRecovery = v; }
-bool braw_clip_get_preview_lut(BrawClipHandle* h)            { return h ? h->adjustments.previewLUT : false; }
-void braw_clip_set_preview_lut(BrawClipHandle* h, bool v)   { if (h) h->adjustments.previewLUT = v; }
-void braw_clip_copy_adjustments(BrawClipHandle* src, BrawClipHandle* dst) { if (src && dst) dst->adjustments = src->adjustments; }
+uint32_t braw_clip_get_iso(BrawClipHandle* h)               { if(!h)return 0; std::lock_guard lock(h->settingsMutex); return h->adjustments.iso; }
+void braw_clip_set_iso(BrawClipHandle* h, uint32_t v)       { if (h) {std::lock_guard lock(h->settingsMutex); h->adjustments.iso = v;} }
+uint32_t braw_clip_get_color_temp(BrawClipHandle* h)         { if(!h)return 0; std::lock_guard lock(h->settingsMutex); return h->adjustments.colorTemp; }
+void braw_clip_set_color_temp(BrawClipHandle* h, uint32_t v) { if (h) {std::lock_guard lock(h->settingsMutex); h->adjustments.colorTemp = v;} }
+int16_t  braw_clip_get_tint(BrawClipHandle* h)               { if(!h)return 0; std::lock_guard lock(h->settingsMutex); return h->adjustments.tint; }
+void braw_clip_set_tint(BrawClipHandle* h, int16_t v)       { if (h) {std::lock_guard lock(h->settingsMutex); h->adjustments.tint = v;} }
+float    braw_clip_get_exposure(BrawClipHandle* h)           { if(!h)return 0; std::lock_guard lock(h->settingsMutex); return h->adjustments.exposure; }
+void braw_clip_set_exposure(BrawClipHandle* h, float v)     { if (h) {std::lock_guard lock(h->settingsMutex); h->adjustments.exposure = v;} }
+bool braw_clip_get_highlight_recovery(BrawClipHandle* h)     { if(!h)return false; std::lock_guard lock(h->settingsMutex); return h->adjustments.highlightRecovery; }
+void braw_clip_set_highlight_recovery(BrawClipHandle* h, bool v) { if (h) {std::lock_guard lock(h->settingsMutex); h->adjustments.highlightRecovery = v;} }
+bool braw_clip_get_preview_lut(BrawClipHandle* h)            { if(!h)return false; std::lock_guard lock(h->settingsMutex); return h->adjustments.previewLUT; }
+void braw_clip_set_preview_lut(BrawClipHandle* h, bool v)   { if (h) {std::lock_guard lock(h->settingsMutex); h->adjustments.previewLUT = v;} }
+void braw_clip_copy_adjustments(BrawClipHandle* src, BrawClipHandle* dst) { if (src && dst && src!=dst) {std::scoped_lock lock(src->settingsMutex,dst->settingsMutex); dst->adjustments = src->adjustments;} }
 
 // ── Decode ────────────────────────────────────────
 
@@ -170,12 +186,15 @@ uint8_t* braw_clip_decode_frame(BrawClipHandle* h, uint64_t index, int* w, int* 
     if (!h) return nullptr;
     std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
     ensureDecoder(h);
+    ClipAdjustments adjustments;
+    {std::lock_guard settingsLock(h->settingsMutex);adjustments=h->adjustments;}
     int bpr = 0;
-    h->pendingOps++;
-    auto pixels = h->decoder->DecodeFrameSync(index, w, outH, &bpr, h->adjustments);
-    h->pendingOps--;
+    if(!h->decoderOpen) {h->lastError=h->decoder->LastError();return nullptr;}
+    auto pixels = h->decoder->DecodeFrameSync(index, w, outH, &bpr, adjustments);
+    h->lastError=h->decoder->LastError();
     if (pixels.empty()) return nullptr;
     uint8_t* out = (uint8_t*)malloc(pixels.size());
+    if(!out){h->lastError="Unable to allocate frame memory";return nullptr;}
     memcpy(out, pixels.data(), pixels.size());
     return out;
 }
@@ -184,12 +203,15 @@ uint8_t* braw_clip_decode_frame_scaled(BrawClipHandle* h, uint64_t index, int* w
     if (!h) return nullptr;
     std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
     ensureDecoder(h);
+    ClipAdjustments adjustments;
+    {std::lock_guard settingsLock(h->settingsMutex);adjustments=h->adjustments;}
     int bpr = 0;
-    h->pendingOps++;
-    auto pixels = h->decoder->DecodeFrameSync(index, w, outH, &bpr, h->adjustments, scale);
-    h->pendingOps--;
+    if(!h->decoderOpen) {h->lastError=h->decoder->LastError();return nullptr;}
+    auto pixels = h->decoder->DecodeFrameSync(index, w, outH, &bpr, adjustments, scale);
+    h->lastError=h->decoder->LastError();
     if (pixels.empty()) return nullptr;
     uint8_t* out = (uint8_t*)malloc(pixels.size());
+    if(!out){h->lastError="Unable to allocate frame memory";return nullptr;}
     memcpy(out, pixels.data(), pixels.size());
     return out;
 }
@@ -202,7 +224,10 @@ extern "C" void braw_diag_log(const char* msg) {
 }
 
 // Legacy stubs
-extern "C" int64_t braw_get_resident_memory(void) { return 0; }
+extern "C" int64_t braw_get_resident_memory(void) {
+    task_vm_info_data_t info{}; mach_msg_type_number_t count=TASK_VM_INFO_COUNT;
+    return task_info(mach_task_self(),TASK_VM_INFO,(task_info_t)&info,&count)==KERN_SUCCESS?info.phys_footprint:0;
+}
 extern "C" void braw_pressure_relief(void) {}
 extern "C" void braw_log_init_path(const char*) {}
 
@@ -210,14 +235,14 @@ bool braw_clip_get_audio_format(BrawClipHandle* h, uint32_t* sr, uint32_t* ch) {
     if (!h || !sr || !ch) return false;
     std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
     ensureDecoder(h);
-    return h->decoder->GetAudioFormat(sr, ch);
+    return h->decoderOpen && h->decoder->GetAudioFormat(sr, ch);
 }
 
 float* braw_clip_extract_audio(BrawClipHandle* h, uint32_t* sr, uint32_t* ch, uint64_t* sc) {
     if (!h) return nullptr;
     std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
     ensureDecoder(h);
-    return h->decoder->ExtractAudio(sr, ch, sc);
+    return h->decoderOpen ? h->decoder->ExtractAudio(sr, ch, sc) : nullptr;
 }
 
 // ── Project API ──────────────────────────────────
@@ -230,9 +255,9 @@ void braw_project_destroy(BrawProjectHandle* h) {
 
 int braw_project_import(BrawProjectHandle* h, const char* path) {
     if (!h) return -1;
-    std::lock_guard<std::recursive_mutex> lock(h->mtx);
     auto* clip = braw_clip_open(path);
     if (!clip || clip->nativeWidth == 0) { braw_clip_close(clip); return -1; }
+    std::lock_guard<std::recursive_mutex> lock(h->mtx);
     h->clips.push_back(clip);
     if (h->selectedIndex < 0) h->selectedIndex = 0;
     return (int)(h->clips.size() - 1);
@@ -248,12 +273,17 @@ void braw_project_remove(BrawProjectHandle* h, int index) {
     else if (h->selectedIndex >= (int)h->clips.size()) h->selectedIndex = (int)(h->clips.size() - 1);
 }
 
-int braw_project_get_clip_count(BrawProjectHandle* h) { return h ? (int)h->clips.size() : 0; }
-BrawClipHandle* braw_project_get_clip(BrawProjectHandle* h, int index) {
-    return (!h || index < 0 || index >= (int)h->clips.size()) ? nullptr : h->clips[index];
+int braw_project_get_clip_count(BrawProjectHandle* h) { if(!h)return 0;std::lock_guard lock(h->mtx);return h->clips.size(); }
+BrawClipHandle* braw_project_get_clip(BrawProjectHandle* h,int index) {
+    if(!h)return nullptr;std::lock_guard lock(h->mtx);
+    return index<0||index>=(int)h->clips.size()?nullptr:h->clips[index];
 }
-int  braw_project_get_selected_index(BrawProjectHandle* h) { return h ? h->selectedIndex : -1; }
-void braw_project_set_selected_index(BrawProjectHandle* h, int index) { if (h) h->selectedIndex = index; }
+BrawClipHandle* braw_project_get_clip_retained(BrawProjectHandle* h,int index) {
+    if(!h)return nullptr;std::lock_guard lock(h->mtx);
+    auto* clip=braw_project_get_clip(h,index);braw_clip_retain(clip);return clip;
+}
+int braw_project_get_selected_index(BrawProjectHandle* h) {if(!h)return -1;std::lock_guard lock(h->mtx);return h->selectedIndex;}
+void braw_project_set_selected_index(BrawProjectHandle* h,int index) {if(h){std::lock_guard lock(h->mtx);h->selectedIndex=index;}}
 
 void braw_project_clear(BrawProjectHandle* h) {
     if (!h) return;
@@ -273,7 +303,7 @@ int braw_get_export_gyro(void) {
 }
 
 void braw_kill_stale_processes(void) {
-    system("pkill -9 BrawTranscoder 2>/dev/null || true; pkill -9 export_helper 2>/dev/null || true");
+    // Every child is owned and reaped by ChildProcess. No global process killing.
 }
 
 int braw_clip_write_gyroflow_sidecar(BrawClipHandle* h, const char* outputMovPath) {

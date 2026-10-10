@@ -49,6 +49,7 @@ int main(int argc, char** argv) {
     }
 
     int numClips = argc - 1;
+    int failures=0;
     setvbuf(stdout, NULL, _IONBF, 0);
 
     printf("═══════════════════════════════════════════════════════════════\n");
@@ -65,11 +66,13 @@ int main(int argc, char** argv) {
     printf("\n--- Import ---\n");
     for (int i = 0; i < numClips; i++) {
         int idx = braw_project_import(proj, argv[i+1]);
+        if(idx<0)failures++;
         printf("  Import %d -> idx=%d  filename='%s'\n",
                i, idx,
                braw_clip_get_filename(braw_project_get_clip(proj, idx)));
     }
     printf("  Total clips: %d\n", braw_project_get_clip_count(proj));
+    if(failures){braw_project_destroy(proj);return 1;}
 
     // ── Test: Single-frame decode (metadata + thumbnail) ──
     printf("\n--- Single-frame decode (CPU) ---\n");
@@ -83,6 +86,7 @@ int main(int argc, char** argv) {
                braw_clip_get_width(clip), braw_clip_get_height(clip),
                w, h,
                pixels ? " ✓" : " ✗");
+        if(!pixels)failures++;
         if (pixels) {
             // Verify pixel data is non-zero (frame decoded)
             bool hasContent = false;
@@ -115,13 +119,14 @@ int main(int argc, char** argv) {
     int ret = braw_export_start(proj, allIndices, count, 1, 3, 0, 200,
                                  tmpDir, nullptr, nullptr);
     printf("  braw_export_start returned: %d\n", ret);
+    if(ret)fprintf(stderr,"Export error: %s\n",braw_export_last_error());
 
     while (braw_export_is_running()) usleep(100000);
     double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     printf("  Export time: %.1fs\n\n", secs);
 
     printf("  Output files:\n");
-    int rc = 0;
+    int rc = ret==0?0:1;
     for (int i = 0; i < numClips && i < 16; i++) {
         auto* clip = braw_project_get_clip(proj, i);
         if (!clip) continue;
@@ -140,5 +145,5 @@ int main(int argc, char** argv) {
     printf("\n═══════════════════════════════════════════════════════════════\n");
     printf("  OVERALL: %s\n", rc == 0 ? "ALL TESTS PASSED ✓" : "SOME TESTS FAILED ✗");
     printf("═══════════════════════════════════════════════════════════════\n");
-    return rc;
+    return rc||failures;
 }

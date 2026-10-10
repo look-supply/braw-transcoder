@@ -5,6 +5,7 @@
 #include <map>
 #include <functional>
 #include <memory>
+#include <atomic>
 
 class BrawDecoder {
 public:
@@ -40,10 +41,8 @@ public:
                                           const ClipAdjustments& adjustments,
                                           float scale = 1.0f);
 
-    // Batch CPU decode for export. Decodes all frames in [startFrame, endFrame)
-    // using concurrent jobs across available CPU cores. Callbacks fire in frame
-    // order. Blocks until all frames complete.
-    // concurrency = 0 means auto-detect (CPU core count - 1).
+    // Compatibility API: bounded sequential requests in [startFrame, endFrame).
+    // Callbacks fire in frame order; SDK work is isolated in a child process.
     void DecodeFramesCPUBatch(uint64_t startFrame, uint64_t endFrame,
                                const ClipAdjustments& adjustments,
                                FrameCallback callback,
@@ -85,9 +84,17 @@ public:
     GyroData ExtractGyroData();
 
     // Set pixel format for decode (must be called before OpenClip)
-    void SetOutputFormat(int format);  // 0=RGBAU8 (default), 1=RGBU16
+    void SetOutputFormat(int format);  // 0=BGRAU8 (default), 1=RGBU16
+    void SetCustomLUT(const std::string& path);
 
     void FlushJobs();
+    struct AudioInfo { uint32_t rate=0, channels=0, bits=0; uint64_t samples=0; };
+    AudioInfo GetAudioInfo() const;
+    bool ReadAudio(uint64_t start, uint32_t count, std::vector<uint8_t>& bytes);
+    void SetCancellation(const std::atomic<bool>* cancel);
+    std::string LastError() const;
+    std::string SDKVersion() const;
+    bool UsingMetal() const;
 
     struct Impl;
     friend class BrawDecoderCallback;

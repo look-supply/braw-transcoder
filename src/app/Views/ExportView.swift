@@ -6,7 +6,7 @@ struct ExportView: View {
     @State private var selectedCodec = 1
     @State private var selectedProResProfile = 3
     @State private var selectedResolution = 0
-    @State private var selectedDataRate = 2
+    @State private var selectedDataRate = 4
     @State private var outputDir = ""
     
     init(project: ProjectModel) {
@@ -17,11 +17,11 @@ struct ExportView: View {
     let codecs = ["H.264", "H.265", "ProRes"]
     let proResProfiles = ["422 Proxy", "422 LT", "422", "422 HQ", "4444", "4444 XQ"]
     let resolutions = ["Passthrough", "4K DCI", "4K UHD", "2K DCI", "1080p HD"]
-    let dataRates = ["100 Mbps", "150 Mbps", "200 Mbps", "250 Mbps", "300 Mbps", "400 Mbps", "500 Mbps", "600 Mbps"]
-    let dataRateValues = [100, 150, 200, 250, 300, 400, 500, 600]
+    let dataRates = ["30 Mbps", "50 Mbps", "100 Mbps", "150 Mbps", "200 Mbps", "250 Mbps", "300 Mbps", "400 Mbps", "500 Mbps", "600 Mbps"]
+    let dataRateValues = [30, 50, 100, 150, 200, 250, 300, 400, 500, 600]
     
     var estimatedOutput: String {
-        guard let clip = project.selectedClip else { return "—" }
+        guard let clip = project.selectedClip, clip.nativeHeight > 0 else { return "—" }
         if selectedResolution == 0 {
             return "\(clip.nativeWidth) × \(clip.nativeHeight) (passthrough)"
         }
@@ -114,16 +114,21 @@ struct ExportView: View {
                     Button(action: { exportActiveClip() }) {
                         Label("Export Selected", systemImage: "arrow.right.circle.fill").frame(width: 130)
                     }.buttonStyle(.borderedProminent).controlSize(.small)
-                        .disabled(project.clipCount == 0 || exportMgr.isExporting)
+                        .disabled(project.clipCount == 0 || project.isImporting || exportMgr.isExporting)
                     
                     Button(action: { exportAllClips() }) {
                         Label("Export All", systemImage: "arrow.right.circle").frame(width: 130)
                     }.buttonStyle(.bordered).controlSize(.small)
-                        .disabled(project.clipCount == 0 || exportMgr.isExporting)
+                        .disabled(project.clipCount == 0 || project.isImporting || exportMgr.isExporting)
                 }
             }
             .padding(12)
             
+            if let status = exportMgr.statusMessage {
+                Text(status).font(.caption).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12).padding(.bottom, 8)
+            }
             if exportMgr.isExporting {
                 VStack(spacing: 4) {
                     ProgressView(value: exportMgr.progress, total: 1.0)
@@ -137,7 +142,8 @@ struct ExportView: View {
                         Spacer()
                         Text("\(Int(exportMgr.progress * 100))%")
                             .font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
-                        Button("Cancel") { exportMgr.cancel() }
+                        Button(exportMgr.isCancelling ? "Cancelling…" : "Cancel") { exportMgr.cancel() }
+                            .disabled(exportMgr.isCancelling)
                             .buttonStyle(.borderless).font(.system(size: 10))
                     }.padding(.horizontal, 16).padding(.bottom, 6)
                 }
@@ -155,7 +161,6 @@ struct ExportView: View {
     }
     
     func startExport(selectedOnly: Bool) {
-        NSLog("EXPORTVIEW: startExport selectedOnly=\(selectedOnly) clipCount=\(project.clipCount) selectedIndex=\(project.selectedIndex) isExporting=\(exportMgr.isExporting)")
         var settings = ExportUISettings()
         settings.codec = selectedCodec
         settings.proResProfile = selectedProResProfile
@@ -166,6 +171,6 @@ struct ExportView: View {
         exportMgr.export(settings: settings)
     }
     
-    func exportActiveClip() { NSLog("EXPORTVIEW_BTN: exportActiveClip tapped"); startExport(selectedOnly: true) }
-    func exportAllClips() { NSLog("EXPORTVIEW_BTN: exportAllClips tapped"); startExport(selectedOnly: false) }
+    func exportActiveClip() { startExport(selectedOnly: true) }
+    func exportAllClips() { startExport(selectedOnly: false) }
 }

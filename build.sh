@@ -2,7 +2,7 @@
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="${PROJECT_DIR}/build"
+BUILD_DIR="${BRAW_BUILD_DIR:-${PROJECT_DIR}/build-reliability}"
 FFMPEG_SRC="${PROJECT_DIR}/third_party/ffmpeg/ffmpeg"
 APP_BUNDLE="$BUILD_DIR/BrawTranscoder.app"
 
@@ -17,7 +17,9 @@ bundle_binaries() {
     fi
     # Re-sign bundled binary — cp can corrupt code signatures
     codesign -f -s - "$APP_BUNDLE/Contents/MacOS/ffmpeg" 2>/dev/null
-    echo "  binaries re-signed ✓"
+    codesign -f -s - "$APP_BUNDLE/Contents/MacOS/braw_worker" 2>/dev/null
+    codesign -f -s - "$APP_BUNDLE" 2>/dev/null
+    echo "  app and binaries signed ✓"
 }
 
 usage() {

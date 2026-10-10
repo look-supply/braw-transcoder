@@ -11,6 +11,8 @@ typedef struct BrawProjectHandle BrawProjectHandle;
 
 // ── Clip API ──────────────────────────────────────
 BrawClipHandle* braw_clip_open(const char* path);
+void            braw_clip_retain(BrawClipHandle* h);
+const char*     braw_clip_last_error(BrawClipHandle* h);
 void            braw_clip_close(BrawClipHandle* h);
 void            braw_clip_ensure_decoder(BrawClipHandle* h);
 void            braw_clip_release_decoder(BrawClipHandle* h);
@@ -53,6 +55,14 @@ void     braw_clip_set_preview_lut(BrawClipHandle* h, bool v);
 
 void braw_clip_copy_adjustments(BrawClipHandle* src, BrawClipHandle* dst);
 
+typedef struct {
+    uint32_t iso, temperature;
+    int16_t tint;
+    float exposure;
+    bool highlightRecovery, previewLUT;
+} BrawClipSettings;
+BrawClipSettings braw_clip_get_settings(BrawClipHandle* h);
+
 // Decode a single frame to BGRA8 CPU buffer with current adjustments applied.
 // Caller must free the returned buffer with braw_clip_free_frame().
 uint8_t* braw_clip_decode_frame(BrawClipHandle* h, uint64_t index, int* w, int* outH);
@@ -73,6 +83,8 @@ int                braw_project_import(BrawProjectHandle* h, const char* path);
 void               braw_project_remove(BrawProjectHandle* h, int index);
 int                braw_project_get_clip_count(BrawProjectHandle* h);
 BrawClipHandle*    braw_project_get_clip(BrawProjectHandle* h, int index);
+// Returns a retained handle, safe to keep across asynchronous operations.
+BrawClipHandle*    braw_project_get_clip_retained(BrawProjectHandle* h, int index);
 int                braw_project_get_selected_index(BrawProjectHandle* h);
 void               braw_project_set_selected_index(BrawProjectHandle* h, int index);
 void               braw_project_clear(BrawProjectHandle* h);
@@ -81,17 +93,21 @@ void               braw_project_clear(BrawProjectHandle* h);
 typedef void (*ExportProgressFn)(int clipIndex, int totalClips,
                                   int frameIndex, int totalFrames, void* ctx);
 
-// Export one or more clips. Each clip is decoded on CPU with multi-core
-// parallelism and written to an MOV file via AVAssetWriter. Blocks until
-// all clips complete. Call on a background thread.
-// Returns 0 on success, -1 on failure.
+// Export one or more clips through an isolated decoder and streaming encoder.
+// Blocks until completion, failure, or cancellation. Call on a background thread.
+// Returns 0 on success, -1 on failure, -2 on cancellation.
+// Reserve an export before scheduling background work, so immediate cancellation is honored.
+int  braw_export_prepare(void);
 int  braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                         int codec, int proResProfile, int resolutionMode, int dataRateMbps,
                         const char* outputDir,
                         ExportProgressFn progressFn, void* ctx);
 int  braw_export_is_running(void);
 void braw_export_cancel(void);
-void braw_export_reset(void);  // Force-reset internal state after stuck export
+void braw_export_reset(void);  // No-op while an export is active.
+const char* braw_export_last_error(void);
+void braw_diag_log(const char* msg);
+int64_t braw_get_resident_memory(void);
 
 // ── Gyro Data API ──────────────────────────────
 void braw_set_export_gyro(int enabled);

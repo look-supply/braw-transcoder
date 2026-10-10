@@ -77,6 +77,10 @@ struct PreviewContent: View {
                 }
                 
                 VStack {
+                    if let error = clip.previewError {
+                        Text(error).font(.caption).foregroundStyle(.white)
+                            .padding(8).background(.black.opacity(0.8))
+                    }
                     Spacer()
                     VStack(spacing: 4) {
                         HStack {

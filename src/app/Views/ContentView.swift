@@ -23,5 +23,13 @@ struct ContentView: View {
                 .layoutPriority(1)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .alert("Import failed", isPresented: Binding(
+            get: { project.importError != nil },
+            set: { if !$0 { project.importError = nil } }
+        )) {
+            Button("OK") { project.importError = nil }
+        } message: {
+            Text(project.importError ?? "")
+        }
     }
 }
