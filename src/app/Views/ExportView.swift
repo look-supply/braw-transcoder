@@ -8,6 +8,7 @@ struct ExportView: View {
     @State private var selectedResolution = 0
     @State private var selectedDataRate = 4
     @AppStorage("exportOutputDirectory") private var outputDir = ""
+    @AppStorage("exportUseSourceDirectory") private var useSourceDirectory = true
     
     init(project: ProjectModel) {
         self.project = project
@@ -97,14 +98,21 @@ struct ExportView: View {
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Output").font(.system(size: 10)).foregroundColor(.secondary)
-                    HStack(spacing: 4) {
-                        TextField("~/Movies", text: $outputDir)
-                            .textFieldStyle(.roundedBorder).frame(width: 160).font(.system(size: 11))
-                            .disabled(exportMgr.isExporting)
-                        Button(action: pickOutputDir) {
-                            Image(systemName: "folder")
-                        }.buttonStyle(.borderless)
+                    Toggle("Same folder as BRAW", isOn: $useSourceDirectory)
+                        .toggleStyle(.checkbox)
+                        .font(.system(size: 11))
+                        .help("Save each MOV beside its original BRAW file.")
                         .disabled(exportMgr.isExporting)
+                    if !useSourceDirectory {
+                        HStack(spacing: 4) {
+                            TextField("Same folder as BRAW", text: $outputDir)
+                                .textFieldStyle(.roundedBorder).frame(width: 160).font(.system(size: 11))
+                                .disabled(exportMgr.isExporting)
+                            Button(action: pickOutputDir) {
+                                Image(systemName: "folder")
+                            }.buttonStyle(.borderless)
+                            .disabled(exportMgr.isExporting)
+                        }
                     }
                 }
                 
@@ -169,7 +177,7 @@ struct ExportView: View {
         settings.proResProfile = selectedProResProfile
         settings.resolutionMode = selectedResolution
         settings.dataRateMbps = dataRateValues[selectedDataRate]
-        settings.outputDir = outputDir
+        settings.outputDir = useSourceDirectory ? "" : outputDir.trimmingCharacters(in: .whitespacesAndNewlines)
         settings.selectedIndices = selectedOnly ? [project.selectedIndex] : []
         exportMgr.export(settings: settings)
     }
