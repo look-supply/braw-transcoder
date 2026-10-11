@@ -7,11 +7,15 @@
 #include <mutex>
 #include <atomic>
 #include <mach/mach.h>
+#include <sys/stat.h>
 
 struct BrawClipHandle {
     std::unique_ptr<BrawDecoder> decoder;
     ClipAdjustments adjustments;
     std::string filePath;
+    dev_t sourceDevice = 0;
+    ino_t sourceInode = 0;
+    bool hasFileIdentity = false;
     uint32_t nativeWidth  = 0;
     uint32_t nativeHeight = 0;
     float    frameRate    = 0;
@@ -73,6 +77,11 @@ BrawClipHandle* braw_clip_open(const char* path) {
     if (!path || !path[0]) return nullptr;
     auto* h = new BrawClipHandle();
     h->filePath = path;
+    struct stat fileInfo{};
+    if (stat(path, &fileInfo) == 0) {
+        h->sourceDevice = fileInfo.st_dev; h->sourceInode = fileInfo.st_ino;
+        h->hasFileIdentity = true;
+    }
     h->adjustments = {};
     h->decoder = std::make_unique<BrawDecoder>();
     if (h->decoder->OpenClip(path)) {
@@ -254,10 +263,24 @@ void braw_project_destroy(BrawProjectHandle* h) {
 }
 
 int braw_project_import(BrawProjectHandle* h, const char* path) {
-    if (!h) return -1;
+    if (!h || !path || !path[0]) return -1;
+    struct stat fileInfo{};
+    if (stat(path, &fileInfo) != 0) return -1;
+    auto alreadyImported = [&] {
+        for (const auto* existing : h->clips)
+            if (existing->hasFileIdentity && existing->sourceDevice == fileInfo.st_dev &&
+                existing->sourceInode == fileInfo.st_ino) return true;
+        return false;
+    };
+    {
+        std::lock_guard lock(h->mtx);
+        if (alreadyImported()) return -2;
+    }
     auto* clip = braw_clip_open(path);
     if (!clip || clip->nativeWidth == 0) { braw_clip_close(clip); return -1; }
     std::lock_guard<std::recursive_mutex> lock(h->mtx);
+    // Recheck under the insertion lock for simultaneous imports.
+    if (alreadyImported()) { braw_clip_close(clip); return -2; }
     h->clips.push_back(clip);
     if (h->selectedIndex < 0) h->selectedIndex = 0;
     return (int)(h->clips.size() - 1);

@@ -119,10 +119,10 @@ struct ExportView: View {
                 Spacer()
                 
                 VStack(alignment: .center, spacing: 4) {
-                    Button(action: { exportActiveClip() }) {
+                    Button(action: { exportSelectedClips() }) {
                         Label("Export Selected", systemImage: "arrow.right.circle.fill").frame(width: 130)
                     }.buttonStyle(.borderedProminent).controlSize(.small)
-                        .disabled(project.clipCount == 0 || project.isImporting || exportMgr.isExporting)
+                        .disabled(project.selectedIndices.isEmpty || project.isImporting || exportMgr.isExporting)
                     
                     Button(action: { exportAllClips() }) {
                         Label("Export All", systemImage: "arrow.right.circle").frame(width: 130)
@@ -172,16 +172,17 @@ struct ExportView: View {
     }
     
     func startExport(selectedOnly: Bool) {
+        if selectedOnly && project.selectedIndices.isEmpty { return }
         var settings = ExportUISettings()
         settings.codec = selectedCodec
         settings.proResProfile = selectedProResProfile
         settings.resolutionMode = selectedResolution
         settings.dataRateMbps = dataRateValues[selectedDataRate]
         settings.outputDir = useSourceDirectory ? "" : outputDir.trimmingCharacters(in: .whitespacesAndNewlines)
-        settings.selectedIndices = selectedOnly ? [project.selectedIndex] : []
+        settings.selectedIndices = selectedOnly ? project.selectedIndices.sorted() : []
         exportMgr.export(settings: settings)
     }
     
-    func exportActiveClip() { startExport(selectedOnly: true) }
+    func exportSelectedClips() { startExport(selectedOnly: true) }
     func exportAllClips() { startExport(selectedOnly: false) }
 }

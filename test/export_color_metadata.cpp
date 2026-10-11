@@ -1,4 +1,5 @@
 #include "core/ExportColorMetadata.h"
+#include "core/ExportRecordingMetadata.h"
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -31,6 +32,25 @@ int main() {
         require(BlackmagicFilmMetadata("Blackmagic Design Film", "Blackmagic Design", 5, "Panasonic S1H").empty(), "External camera incorrectly labeled Blackmagic Film");
         require(BlackmagicFilmMetadata("Blackmagic Design Film", "Blackmagic Design", 0, camera).empty(), "Unknown generation accepted");
         require(BlackmagicFilmMetadata("Blackmagic Design Film", "Blackmagic Design", 7, camera).empty(), "Future generation guessed");
+        ClipAdjustments adjustments;
+        adjustments.iso=800; adjustments.colorTemp=5600; adjustments.tint=-3;
+        adjustments.exposure=1; adjustments.highlightRecovery=true;
+        const auto recording=RecordingMetadata({
+            {"lens_type","LUMIX S 20-60/F3.5-5.6"}, {"focal_length","27mm"},
+            {"white_balance_kelvin","4500"}, {"white_balance_tint","15"},
+            {"iso","400"}, {"date_recorded","2026:07:18"},
+            {"shutter_type","Angle"}, {"shutter_value","180°"}, {"good_take","false"}
+        },adjustments,24);
+        require(recording.at("com.blackmagic-design.camera.lensType")=="LUMIX S 20-60/F3.5-5.6", "Lens lost");
+        require(recording.at("com.blackmagic-design.camera.lensFocalLength")=="27mm", "Lens units lost");
+        require(recording.at("com.blackmagic-design.camera.whiteBalanceKelvin")=="5600", "WB does not match render");
+        require(recording.at("com.blackmagic-design.camera.whiteBalanceTint")=="-3", "Signed tint lost");
+        require(recording.at("com.blackmagic-design.camera.iso")=="800", "ISO does not match render");
+        require(recording.at("com.brawtranscoder.source.metadata.white_balance_kelvin")=="4500", "Original WB lost");
+        require(recording.at("com.blackmagic-design.camera.dateRecorded")=="2026-07-18", "Recording date malformed");
+        require(recording.at("com.blackmagic-design.shutterAngle")=="180°", "Shutter angle lost");
+        require(!recording.contains("com.blackmagic-design.camera.lensDistance"), "Missing focus distance fabricated");
+        require(!recording.contains("com.apple.proapps.isGood"), "Untyped good-take flag would display ASCII code");
         std::cout << "PASS: source-driven Film metadata and unsupported-encoding guards\n";
         return 0;
     } catch (const std::exception& error) {

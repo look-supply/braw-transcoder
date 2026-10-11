@@ -33,29 +33,9 @@ std::map<std::string, std::string> SDKDecoder::GetFreeFormMetadata() const {
     if (!m_impl->clip) return result;
     IBlackmagicRawMetadataIterator* it = nullptr;
     if (FAILED(m_impl->clip->GetMetadataIterator(&it)) || !it) return result;
-    while (it->Next() == S_OK) {
-        CFStringRef key = nullptr; Variant val; VariantInit(&val);
-        if (SUCCEEDED(it->GetKey(&key))) {
-            if (SUCCEEDED(it->GetData(&val))) {
-                std::string k = Impl::FromCFString(key);
-                std::string v;
-                switch (val.vt) {
-                    case blackmagicRawVariantTypeString: v = val.bstrVal ? Impl::FromCFString(val.bstrVal) : ""; break;
-                    case blackmagicRawVariantTypeU32:  v = std::to_string(val.uintVal); break;
-                    case blackmagicRawVariantTypeS16:  v = std::to_string(val.iVal); break;
-                    case blackmagicRawVariantTypeFloat32: v = std::to_string(val.fltVal); break;
-                    case blackmagicRawVariantTypeU16:  v = std::to_string(val.uiVal); break;
-                    case blackmagicRawVariantTypeFloat64: v = std::to_string(val.dblVal); break;
-                    case blackmagicRawVariantTypeS32:  v = std::to_string(val.intVal); break;
-                    default: v = "(unknown type)"; break;
-                }
-                if (!k.empty() && !v.empty()) result[k] = v;
-                VariantClear(&val);
-            }
-            CFRelease(key);
-        }
-    }
+    result=ReadCameraMetadata(it);
     it->Release();
+    for(const auto& [key,value]:m_impl->frameMetadata)result[key]=value;
     return result;
 }
 

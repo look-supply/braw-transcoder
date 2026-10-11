@@ -261,6 +261,18 @@ final class ClipModel: Identifiable, ObservableObject {
         exposure = braw_clip_get_exposure(h)
         highlightRecovery = braw_clip_get_highlight_recovery(h)
         previewLUT = braw_clip_get_preview_lut(h)
+        synchronizePresetLabels()
+    }
+
+    func synchronizePresetLabels() {
+        if iso == nativeISO { isoPresetIndex = 0 }
+        else if let index = Self.isoPresets.firstIndex(of: iso) { isoPresetIndex = index + 1 }
+        else { isoPresetIndex = -1 }
+
+        if colorTemp == nativeColorTemp && tint == nativeTint { colorPresetIndex = 0 }
+        else if let index = Self.colorPresets.firstIndex(where: { $0.temp == colorTemp && $0.tint == tint }) {
+            colorPresetIndex = index + 1
+        } else { colorPresetIndex = Self.colorPresetLabels.count - 1 }
     }
 
     func applyISOPreset(_ index: Int) {
@@ -365,6 +377,8 @@ final class ProjectModel: ObservableObject {
     var projectHandle: OpaquePointer? { native.handle }
     @Published var clipCount = 0
     @Published var selectedIndex = -1
+    @Published private(set) var selectedIndices: Set<Int> = []
+    private var selectionAnchor: Int?
     @Published var isExporting = false
     @Published var copiedSettings: StoredAdjustments?
     private var clipCache: [Int: ClipModel] = [:]
@@ -381,41 +395,55 @@ final class ProjectModel: ObservableObject {
             self.importCount -= 1
             self.clipCount = Int(braw_project_get_clip_count(native.handle))
             if index >= 0 { self.selectClip(Int(index)) }
-            else { self.importError = "Could not import \(URL(fileURLWithPath: path).lastPathComponent). The file may be damaged, unsupported, or exceed the processing memory limit." }
+            else if index != -2 { self.importError = "Could not import \(URL(fileURLWithPath: path).lastPathComponent). The file may be damaged, unsupported, or exceed the processing memory limit." }
         }
         return 0
     }
 
     func removeClip(at index: Int) {
-        guard !isExporting, !isImporting else { return }
-        guard let h = projectHandle else { return }
+        guard !isExporting, !isImporting, index >= 0, index < clipCount,
+              let h = projectHandle else { return }
+        selectedClip?.releaseDecoder()
         clipCache.removeValue(forKey: index)
         braw_project_remove(h, Int32(index))
         clipCount = Int(braw_project_get_clip_count(h))
-        selectedIndex = Int(braw_project_get_selected_index(h))
+        selectedIndices = Set(selectedIndices.filter { $0 != index }.map { $0 > index ? $0 - 1 : $0 })
+        if let anchor = selectionAnchor {
+            selectionAnchor = anchor == index ? selectedIndices.min() : (anchor > index ? anchor - 1 : anchor)
+        }
         var newCache: [Int: ClipModel] = [:]
         for (oldIdx, model) in clipCache {
-            if oldIdx > index { newCache[oldIdx - 1] = model }
-            else { newCache[oldIdx] = model }
+            newCache[oldIdx > index ? oldIdx - 1 : oldIdx] = model
         }
         clipCache = newCache
+        selectedIndex = -1
+        braw_project_set_selected_index(h, -1)
+        updatePreviewSelection()
     }
 
-    func selectClip(_ index: Int) {
-        guard !isExporting else { return }
-        guard let h = projectHandle else { return }
-        
-        // Release decoder on previous clip to free SDK resources
-        if let prevClip = getClip(at: selectedIndex) {
-            prevClip.releaseDecoder()
+    func selectClip(_ index: Int, extendingRange: Bool = false, toggling: Bool = false) {
+        guard !isExporting, index >= 0, index < clipCount else { return }
+        if extendingRange, let anchor = selectionAnchor {
+            let range = Set(min(anchor, index)...max(anchor, index))
+            selectedIndices = toggling ? selectedIndices.union(range) : range
+        } else if toggling {
+            if selectedIndices.contains(index) { selectedIndices.remove(index) }
+            else { selectedIndices.insert(index) }
+            selectionAnchor = index
+        } else {
+            selectedIndices = [index]
+            selectionAnchor = index
         }
-        
-        braw_project_set_selected_index(h, Int32(index))
-        selectedIndex = index
+        updatePreviewSelection()
+    }
 
-        if let clip = getClip(at: index) {
-            clip.loadPreviewFrame()
-        }
+    private func updatePreviewSelection() {
+        let first = selectedIndices.min() ?? -1
+        guard first != selectedIndex, let h = projectHandle else { return }
+        getClip(at: selectedIndex)?.releaseDecoder()
+        braw_project_set_selected_index(h, Int32(first))
+        selectedIndex = first
+        getClip(at: first)?.loadPreviewFrame()
     }
 
     func getClip(at index: Int) -> ClipModel? {
@@ -451,8 +479,7 @@ final class ProjectModel: ObservableObject {
         clip.exposure = settings.exposure
         clip.highlightRecovery = settings.highlightRecovery
         clip.previewLUT = settings.previewLUT
-        clip.isoPresetIndex = settings.isoPresetIndex
-        clip.colorPresetIndex = ClipModel.colorPresetLabels.count - 1
+        clip.synchronizePresetLabels()
     }
 
     func clearAllClips() {
@@ -462,6 +489,8 @@ final class ProjectModel: ObservableObject {
         braw_project_clear(h)
         clipCount = 0
         selectedIndex = -1
+        selectedIndices = []
+        selectionAnchor = nil
     }
 
     func applyClipSettingsToAll(from sourceIndex: Int) {
@@ -470,9 +499,11 @@ final class ProjectModel: ObservableObject {
         guard let srcHandle = braw_project_get_clip(h, Int32(sourceIndex)) else { return }
         for i in 0..<clipCount {
             guard i != sourceIndex else { continue }
-            if let dstHandle = braw_project_get_clip(h, Int32(i)) {
+            // Construct the model before copying: initialization applies native
+            // WB/highlight defaults and must not overwrite the copied values.
+            if let target = getClip(at: i), let dstHandle = braw_project_get_clip(h, Int32(i)) {
                 braw_clip_copy_adjustments(srcHandle, dstHandle)
-                getClip(at: i)?.refreshAdjustmentsFromEngine()
+                target.refreshAdjustmentsFromEngine()
             }
         }
     }
@@ -550,6 +581,9 @@ final class ExportManager: ObservableObject {
         Task { [self, operation] in
             let (result, error) = await Task.detached(priority: .userInitiated) { operation.run() }.value
             isExporting = false; projectModel.isExporting = false; isCancelling = false
+            // Export suspends every preview decoder. Resume the visible clip
+            // on success, cancellation, or failure so edits refresh it again.
+            projectModel.selectedClip?.loadPreviewFrame()
             if result == 0 { progress = 1; statusMessage = "Export complete." }
             else if result == -2 { statusMessage = "Export cancelled." }
             else { statusMessage = error.isEmpty ? "Export failed." : error }

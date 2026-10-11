@@ -3,6 +3,7 @@
 #include "core/BrawDecoder.h"
 #include "core/ChildProcess.h"
 #include "core/ExportColorMetadata.h"
+#include "core/ExportRecordingMetadata.h"
 #include "core/QuickTimeMetadata.h"
 #import <Foundation/Foundation.h>
 #include <atomic>
@@ -110,6 +111,12 @@ static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution
     metadata("com.brawtranscoder.source.camera_type",camera);
     if(generation)metadata("com.brawtranscoder.source.color_science_generation",std::to_string(generation));
     metadata("com.brawtranscoder.source.filename",fs::path(braw_clip_get_filepath(clip)).filename().string());
+    const auto sourceMetadata=decoder.GetFreeFormMetadata();
+    for(const auto& [key,value]:RecordingMetadata(sourceMetadata,a,decoder.GetFrameRate()))
+        metadata(key,value);
+    const auto timecode=sourceMetadata.find("timecode");
+    if(timecode!=sourceMetadata.end()&&!timecode->second.empty())
+        args.insert(args.end(),{"-timecode",timecode->second});
     for(const auto& [key,value]:BlackmagicFilmMetadata(gamma,gamut,generation,camera))
         metadata(key,value);
     if(!gamma.empty()||!gamut.empty()) {

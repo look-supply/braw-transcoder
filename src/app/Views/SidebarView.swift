@@ -3,7 +3,6 @@ import UniformTypeIdentifiers
 
 struct SidebarView: View {
     @ObservedObject var project: ProjectModel
-    @State private var selectedIndices: Set<Int> = []
     @State private var keyMonitor: Any?
     @State private var isDropTargeted = false
     
@@ -12,15 +11,15 @@ struct SidebarView: View {
             HStack {
                 Text("Assets").font(.headline).foregroundColor(.secondary)
                 Spacer()
-                if !selectedIndices.isEmpty {
-                    Text("\(selectedIndices.count) selected")
+                if !project.selectedIndices.isEmpty {
+                    Text("\(project.selectedIndices.count) selected")
                         .font(.system(size: 11)).foregroundColor(.accentColor)
                 }
                 if project.clipCount > 0 {
-                    Button(action: { project.clearAllClips(); selectedIndices.removeAll() }) {
+                    Button(action: deleteSelectedClips) {
                         Image(systemName: "trash")
-                    }.help("Clear all clips")
-                    .disabled((project.isExporting || project.isImporting))
+                    }.help("Remove selected clips")
+                    .disabled(project.isExporting || project.isImporting || project.selectedIndices.isEmpty)
                 }
                 Button(action: importFiles) {
                     Image(systemName: "plus")
@@ -35,23 +34,18 @@ struct SidebarView: View {
                 LazyVStack(spacing: 0) {
                     ForEach(0..<project.clipCount, id: \.self) { index in
                         if let clip = project.getClip(at: index) {
-                            let isSelected = selectedIndices.contains(index)
+                            let isSelected = project.selectedIndices.contains(index)
                             let isActive = index == project.selectedIndex
                             
                             ClipRowView(clip: clip, isActive: isActive, isSelected: isSelected)
                                 .contentShape(Rectangle())
                                 .onAppear { clip.loadThumbnail() }
-                                .onTapGesture {
-                                    guard !(project.isExporting || project.isImporting) else { return }
-                                    if NSEvent.modifierFlags.contains(.command) {
-                                        if selectedIndices.contains(index) {
-                                            selectedIndices.remove(index)
-                                        } else {
-                                            selectedIndices.insert(index)
-                                        }
-                                    } else {
-                                        project.selectClip(index)
-                                        selectedIndices = [index]
+                                .overlay {
+                                    ClipSelectionClickTarget { modifiers in
+                                        guard !project.isExporting, !project.isImporting else { return }
+                                        project.selectClip(index,
+                                            extendingRange: modifiers.contains(.shift),
+                                            toggling: modifiers.contains(.control) || modifiers.contains(.command))
                                     }
                                 }
                                 .contextMenu {
@@ -60,7 +54,7 @@ struct SidebarView: View {
                                     }
                                     
                                     Button("Paste Settings") {
-                                        if selectedIndices.contains(index) {
+                                        if project.selectedIndices.contains(index) {
                                             pasteToSelectedClips()
                                         } else {
                                             project.pasteSettings(to: index)
@@ -71,7 +65,6 @@ struct SidebarView: View {
                                     
                                     Button("Remove", role: .destructive) {
                                         project.removeClip(at: index)
-                                        selectedIndices.remove(index)
                                     }
                                 }
                             
@@ -158,23 +151,18 @@ struct SidebarView: View {
         return true
     }
     
-    var multiSelectedIndices: [Int] {
-        selectedIndices.sorted()
-    }
-    
     func deleteSelectedClips() {
-        guard !(project.isExporting || project.isImporting), !selectedIndices.isEmpty else { return }
-        let sorted = selectedIndices.sorted(by: >)
+        guard !(project.isExporting || project.isImporting), !project.selectedIndices.isEmpty else { return }
+        let sorted = project.selectedIndices.sorted(by: >)
         for idx in sorted {
             project.removeClip(at: idx)
         }
-        selectedIndices.removeAll()
     }
     
     func copyActiveClipSettings() {
         guard !(project.isExporting || project.isImporting) else { return }
         let sourceIndex: Int
-        if selectedIndices.count == 1, let only = selectedIndices.first {
+        if project.selectedIndices.count == 1, let only = project.selectedIndices.first {
             sourceIndex = only
         } else {
             sourceIndex = project.selectedIndex
@@ -184,10 +172,25 @@ struct SidebarView: View {
     }
     
     func pasteToSelectedClips() {
-        guard !(project.isExporting || project.isImporting), !selectedIndices.isEmpty else { return }
+        guard !(project.isExporting || project.isImporting), !project.selectedIndices.isEmpty else { return }
         guard project.copiedSettings != nil else { return }
-        for idx in selectedIndices {
+        for idx in project.selectedIndices {
             project.pasteSettings(to: idx)
+        }
+    }
+}
+
+private struct ClipSelectionClickTarget: NSViewRepresentable {
+    var onClick: (NSEvent.ModifierFlags) -> Void
+    func makeNSView(context: Context) -> ClickView { ClickView() }
+    func updateNSView(_ view: ClickView, context: Context) { view.onClick = onClick }
+
+    final class ClickView: NSView {
+        var onClick: ((NSEvent.ModifierFlags) -> Void)?
+        override func mouseDown(with event: NSEvent) { onClick?(event.modifierFlags) }
+        override func rightMouseDown(with event: NSEvent) {
+            if event.buttonNumber == 0 { onClick?(event.modifierFlags) }
+            else { super.rightMouseDown(with: event) }
         }
     }
 }

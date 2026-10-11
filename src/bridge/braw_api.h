@@ -79,6 +79,7 @@ bool     braw_clip_get_audio_format(BrawClipHandle* h, uint32_t* sampleRate,
 // ── Project API ──────────────────────────────────
 BrawProjectHandle* braw_project_create(void);
 void               braw_project_destroy(BrawProjectHandle* h);
+// Returns the new index, -1 on failure, or -2 when the same file is already imported.
 int                braw_project_import(BrawProjectHandle* h, const char* path);
 void               braw_project_remove(BrawProjectHandle* h, int index);
 int                braw_project_get_clip_count(BrawProjectHandle* h);
