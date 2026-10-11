@@ -1,7 +1,9 @@
 #include "worker/SDKDecoder.h"
+#include "worker/Protocol.h"
 #include "BlackmagicRawAPI.h"
 #include "BlackmagicRawAPIDispatch.cpp"
 #import <Metal/Metal.h>
+#import <Accelerate/Accelerate.h>
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
@@ -25,6 +27,7 @@ struct SDKDecoder::Impl {
     int format=0;
     ClipAdjustments adjustments;
     float scale=1;
+    uint32_t previewWidth=0,previewHeight=0;
     Frame frame;
     std::string cameraType, version;
     std::map<std::string,std::string> frameMetadata;
@@ -121,17 +124,40 @@ public:
         attrs->SetFrameAttribute(blackmagicRawFrameProcessingAttributeExposure,&v);
         v.vt=blackmagicRawVariantTypeU16; v.uiVal=a.highlightRecovery?1:0;
         clipAttrs->SetClipAttribute(blackmagicRawClipProcessingAttributeHighlightRecovery,&v);
-        v.vt=blackmagicRawVariantTypeString; v.bstrVal=a.previewLUT?CFSTR("Embedded"):CFSTR("");
-        clipAttrs->SetClipAttribute(blackmagicRawClipProcessingAttributePost3DLUTMode,&v);
+        v.vt=blackmagicRawVariantTypeString; v.bstrVal=a.previewLUT?CFSTR("Embedded"):CFSTR("Disabled");
+        HRESULT lutResult=clipAttrs->SetClipAttribute(blackmagicRawClipProcessingAttributePost3DLUTMode,&v);
+        if(FAILED(lutResult)) {
+            fprintf(stderr,"Could not set preview LUT mode to %s: 0x%x\n",a.previewLUT?"Embedded":"Disabled",unsigned(lutResult));
+            attrs->Release();clipAttrs->Release();if(job)job->Release();impl->Finish(false);return;
+        }
         if(impl->scale<=.125f) frame->SetResolutionScale(blackmagicRawResolutionScaleEighth);
         else if(impl->scale<=.25f) frame->SetResolutionScale(blackmagicRawResolutionScaleQuarter);
         else if(impl->scale<=.5f) frame->SetResolutionScale(blackmagicRawResolutionScaleHalf);
+        else frame->SetResolutionScale(blackmagicRawResolutionScaleFull);
         frame->SetResourceFormat(impl->format==1?blackmagicRawResourceFormatRGBU16:blackmagicRawResourceFormatBGRAU8);
+        impl->previewWidth=impl->previewHeight=0;
+        if(a.highlightRecovery && impl->format==0 && impl->scale<1) {
+            // SDK 6 recovery produces colored shadow speckling in reduced
+            // sensor decodes. Recover at full resolution, then resize the
+            // processed image, preserving the sensor-specific preview size.
+            IBlackmagicRawFrameEx* frameEx=nullptr;
+            HRESULT resizeResult=frame->QueryInterface(IID_IBlackmagicRawFrameEx,(void**)&frameEx);
+            if(SUCCEEDED(resizeResult)&&frameEx) {
+                resizeResult=frameEx->GetProcessedImageResolution(&impl->previewWidth,&impl->previewHeight);
+                frameEx->Release();
+            }
+            if(FAILED(resizeResult)||!impl->previewWidth||!impl->previewHeight||
+               FAILED(frame->SetResolutionScale(blackmagicRawResolutionScaleFull))) {
+                fprintf(stderr,"Could not prepare full-resolution highlight recovery preview\n");
+                attrs->Release();clipAttrs->Release();if(job)job->Release();impl->Finish(false);return;
+            }
+        }
         IBlackmagicRawJob* process=nullptr;
         HRESULT hr=frame->CreateJobDecodeAndProcessFrame(clipAttrs,attrs,&process);
         attrs->Release(); clipAttrs->Release(); if(job)job->Release();
         if(FAILED(hr)||!process) { fprintf(stderr,"Create process job failed: 0x%x\n",unsigned(hr));impl->Finish(false); return; }
-        if(FAILED(process->Submit())) { process->Release(); impl->Finish(false); }
+        hr=process->Submit();
+        if(FAILED(hr)) { fprintf(stderr,"Submit process job failed: 0x%x\n",unsigned(hr));process->Release(); impl->Finish(false); }
     }
     void ProcessComplete(IBlackmagicRawJob* job,HRESULT hr,IBlackmagicRawProcessedImage* image) override {
         @autoreleasepool {
@@ -143,7 +169,9 @@ public:
                 image->GetResource(&resource); image->GetResourceType(&type);
                 size_t pixelSize=impl->format==1?6:4;
                 uint64_t imageBytes=uint64_t(w)*h*pixelSize;
-                if(w&&h&&size&&resource&&size<=512ULL*1024*1024&&imageBytes<=size) {
+                if(size>WorkerProtocol::maxPayload)
+                    fprintf(stderr,"Decoded frame exceeds supported payload: %u bytes, limit %llu bytes\n",size,WorkerProtocol::maxPayload);
+                if(w&&h&&size&&resource&&size<=WorkerProtocol::maxPayload&&imageBytes<=size) {
                     const void* bytes=nullptr;
                     id<MTLBuffer> staging=nil;
                     if(type==blackmagicRawResourceTypeBufferCPU) bytes=resource;
@@ -164,8 +192,21 @@ public:
                         }
                     }
                     if(bytes) {
-                        impl->frame.width=w; impl->frame.height=h; impl->frame.stride=w*pixelSize;
-                        impl->frame.pixels.assign((const uint8_t*)bytes,(const uint8_t*)bytes+imageBytes); ok=true;
+                        if(impl->previewWidth && impl->previewHeight) {
+                            const uint32_t outW=impl->previewWidth,outH=impl->previewHeight;
+                            if(outW<=w && outH<=h && uint64_t(outW)*outH*4<=WorkerProtocol::maxPayload) {
+                                impl->frame.pixels.resize(uint64_t(outW)*outH*4);
+                                vImage_Buffer sourceImage{const_cast<void*>(bytes),h,w,size_t(w)*4};
+                                vImage_Buffer destination{impl->frame.pixels.data(),outH,outW,size_t(outW)*4};
+                                const auto resizeError=vImageScale_ARGB8888(&sourceImage,&destination,nullptr,kvImageHighQualityResampling);
+                                if(resizeError==kvImageNoError) {
+                                    impl->frame.width=outW;impl->frame.height=outH;impl->frame.stride=outW*4;ok=true;
+                                } else fprintf(stderr,"Preview resize failed: %ld\n",resizeError);
+                            }
+                        } else {
+                            impl->frame.width=w; impl->frame.height=h; impl->frame.stride=w*pixelSize;
+                            impl->frame.pixels.assign((const uint8_t*)bytes,(const uint8_t*)bytes+imageBytes); ok=true;
+                        }
                     }
                 }
             }
@@ -189,9 +230,12 @@ SDKDecoder::~SDKDecoder(){Close();}
 bool SDKDecoder::Open(const std::string& path,bool metal,int format) {
     Close(); auto& p=*m_impl; p.format=format;
     p.factory=CreateBlackmagicRawFactoryInstanceFromPath(CFSTR(BRAW_SDK_LIBRARY_PATH));
-    if(!p.factory||FAILED(p.factory->CreateCodec(&p.codec)))return false;
+    if(!p.factory){fprintf(stderr,"Could not load Blackmagic RAW SDK from %s\n",BRAW_SDK_LIBRARY_PATH);return false;}
+    HRESULT createResult=p.factory->CreateCodec(&p.codec);
+    if(FAILED(createResult)||!p.codec){fprintf(stderr,"CreateCodec failed: 0x%x\n",unsigned(createResult));return false;}
     IBlackmagicRawConfiguration* config=nullptr;
-    if(FAILED(p.codec->QueryInterface(IID_IBlackmagicRawConfiguration,(void**)&config)))return false;
+    HRESULT configResult=p.codec->QueryInterface(IID_IBlackmagicRawConfiguration,(void**)&config);
+    if(FAILED(configResult)||!config){fprintf(stderr,"Get SDK configuration failed: 0x%x\n",unsigned(configResult));return false;}
     CFStringRef version=nullptr;
     config->GetVersion(&version); p.version=Impl::FromCFString(version); if(version)CFRelease(version);
 
@@ -202,7 +246,7 @@ bool SDKDecoder::Open(const std::string& path,bool metal,int format) {
     } else hr=config->SetPipeline(blackmagicRawPipelineCPU,nullptr,nullptr);
     config->SetCPUThreads(4); config->Release(); if(FAILED(hr)){fprintf(stderr,"SetPipeline failed: 0x%x\n",unsigned(hr));return false;}
     CFStringRef cf=CFStringCreateWithCString(nullptr,path.c_str(),kCFStringEncodingUTF8);
-    if(!cf)return false;
+    if(!cf){fprintf(stderr,"Could not convert source path to a UTF-8 string\n");return false;}
     hr=p.codec->OpenClip(cf,&p.clip); CFRelease(cf);
     if(FAILED(hr)||!p.clip){fprintf(stderr,"OpenClip failed: 0x%x\n",unsigned(hr));return false;}
     p.clip->GetWidth(&p.width); p.clip->GetHeight(&p.height);
@@ -246,11 +290,14 @@ void SDKDecoder::Close() {
     p.frameMetadata.clear();
 }
 bool SDKDecoder::Decode(uint64_t index,const ClipAdjustments& a,float scale,Frame& out) {
-    auto& p=*m_impl; if(!p.clip||index>=p.frameCount)return false;
+    auto& p=*m_impl;
+    if(!p.clip||index>=p.frameCount) {fprintf(stderr,"Cannot read frame %llu: clip open=%d, frame count=%llu\n",index,p.clip!=nullptr,p.frameCount);return false;}
     {std::lock_guard lock(p.mutex);p.completed=false;p.frameOK=false;p.frame={};p.adjustments=a;p.scale=scale;}
     IBlackmagicRawJob* job=nullptr;
-    if(FAILED(p.clip->CreateJobReadFrame(index,&job))||!job)return false;
-    if(FAILED(job->Submit())){job->Release();return false;}
+    HRESULT hr=p.clip->CreateJobReadFrame(index,&job);
+    if(FAILED(hr)||!job){fprintf(stderr,"Create read job for frame %llu failed: 0x%x\n",index,unsigned(hr));return false;}
+    hr=job->Submit();
+    if(FAILED(hr)){fprintf(stderr,"Submit read job for frame %llu failed: 0x%x\n",index,unsigned(hr));job->Release();return false;}
     std::unique_lock lock(p.mutex);
     // An expired request cannot reuse callback storage. Exit the worker instead.
     if(!p.cv.wait_for(lock,std::chrono::seconds(25),[&]{return p.completed;}))_exit(22);

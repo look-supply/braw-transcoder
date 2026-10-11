@@ -96,7 +96,8 @@ typedef void (*ExportProgressFn)(int clipIndex, int totalClips,
 
 // Export one or more clips through an isolated decoder and streaming encoder.
 // Blocks until completion, failure, or cancellation. Call on a background thread.
-// Returns 0 on success, -1 on failure, -2 on cancellation.
+// Returns 0 on success (possibly with skips), -1 on failure, -2 on cancellation,
+// or -3 when every selected clip is unsupported. Read last_warning for skips.
 // Reserve an export before scheduling background work, so immediate cancellation is honored.
 int  braw_export_prepare(void);
 int  braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
@@ -107,6 +108,7 @@ int  braw_export_is_running(void);
 void braw_export_cancel(void);
 void braw_export_reset(void);  // No-op while an export is active.
 const char* braw_export_last_error(void);
+const char* braw_export_last_warning(void);
 void braw_diag_log(const char* msg);
 int64_t braw_get_resident_memory(void);
 

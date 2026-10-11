@@ -33,7 +33,9 @@ std::string SiblingExecutable(const char* name) {
 }
 uint64_t ChildProcess::MemoryBudget() {
     uint64_t physical=0;size_t size=sizeof(physical);sysctlbyname("hw.memsize",&physical,&size,nullptr,0);
-    return std::min<uint64_t>(4ULL*1024*1024*1024,physical/3);
+    // Allow native 17K Metal processing, while reserving at least two thirds
+    // of physical RAM for the application and the rest of the system.
+    return std::min<uint64_t>(8ULL*1024*1024*1024,physical/3);
 }
 uint64_t ChildProcess::ChildrenMemory() {
     std::lock_guard lock(childrenMutex);uint64_t total=0;

@@ -2,7 +2,9 @@
 #include <cstdint>
 namespace WorkerProtocol {
 constexpr uint32_t magic=0x42524136;
-constexpr uint64_t maxPayload=512ULL*1024*1024;
+// A native 17K RGB16 frame is ~806 MiB. Keep IPC bounded while supporting
+// these camera frames; ChildProcess separately enforces the memory budget.
+constexpr uint64_t maxPayload=1024ULL*1024*1024;
 enum Command:uint32_t {Open=1,Frame=2,Audio=3};
 struct Request {
     uint32_t magicValue=magic,command=0;

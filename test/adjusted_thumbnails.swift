@@ -36,6 +36,7 @@ struct AdjustedThumbnailTests {
         precondition(project.importError == nil && project.clipCount == 2, "Import failed")
         let inactive = project.getClip(at: 0)!
         let active = project.getClip(at: 1)!
+        precondition(!active.highlightRecovery && !inactive.highlightRecovery, "Imports forced highlight recovery on")
         project.selectClip(1)
         inactive.loadThumbnail()
         active.loadThumbnail()
@@ -98,6 +99,7 @@ struct AdjustedThumbnailTests {
         project.selectClip(1)
 
         active.resetAdjustments()
+        precondition(!active.highlightRecovery, "Reset forced highlight recovery on")
         try await waitUntil { !active.isLoadingThumbnail && !active.isLoadingPreview }
         precondition(pixels(active.thumbnail) == baseline, "Reset did not restore thumbnail pixels")
 

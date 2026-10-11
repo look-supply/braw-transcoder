@@ -3,6 +3,7 @@
 #include "core/BrawDecoder.h"
 #include "core/ChildProcess.h"
 #include "core/ExportColorMetadata.h"
+#include "core/ExportEncoderError.h"
 #include "core/ExportRecordingMetadata.h"
 #include "core/QuickTimeMetadata.h"
 #import <Foundation/Foundation.h>
@@ -17,7 +18,7 @@
 
 static std::atomic<bool> g_running{false},g_cancel{false};
 static std::mutex g_stateMutex;
-static std::string g_error;
+static std::string g_error,g_warning;
 static bool g_prepared=false;
 static void setError(const std::string& error){std::lock_guard lock(g_stateMutex);g_error=error;}
 static std::string findFFmpeg() {
@@ -74,19 +75,19 @@ static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution
     int targetHeight=resolution==0?nativeHeight:(resolution<=2?2160:1080);
     int targetWidth=resolution==0?nativeWidth:CalculateOutputWidth(targetHeight,nativeWidth,nativeHeight);
     if(targetWidth%2||targetHeight%2){setError("Output dimensions must be even.");return false;}
-    // Use the highest SDK reduction that still supplies enough pixels for the
-    // requested output. Smaller exports need not decode full-resolution frames.
-    float scale=1;
-    if(targetHeight<=nativeHeight/8)scale=.125f;
-    else if(targetHeight<=nativeHeight/4)scale=.25f;
-    else if(targetHeight<=nativeHeight/2)scale=.5f;
+    // Always decode native-resolution RGB16 frames. Screen previews and SDK
+    // reduced-resolution modes must not determine export image quality.
+    // FFmpeg performs the final resize only when an output preset requests it.
+    constexpr float scale=1;
     int width=0,height=0,firstStride=0;
     auto firstFrame=decoder.DecodeFrameSync(0,&width,&height,&firstStride,a,scale);
-    if(firstFrame.empty()||firstStride!=width*6){setError("Could not decode the first export frame: "+decoder.LastError());return false;}
+    if(firstFrame.empty()||firstStride!=width*6||width!=nativeWidth||height!=nativeHeight){setError("Could not decode the first export frame: "+decoder.LastError());return false;}
     fs::path partial=dir.path/"output.mov";
-    std::vector<std::string> args={ffmpeg,"-hide_banner","-loglevel","error","-nostdin","-n",
+    // Input format/fps are explicit; avoid probing and queuing multiple huge
+    // raw frames. These thread limits do not change SDK GPU decoding.
+    std::vector<std::string> args={ffmpeg,"-hide_banner","-loglevel","error","-nostdin","-n","-filter_threads","1","-probesize","32","-analyzeduration","1",
         "-f","rawvideo","-pixel_format","rgb48le","-video_size",std::to_string(width)+"x"+std::to_string(height),
-        "-framerate",std::to_string(decoder.GetFrameRate()),"-i","pipe:0"};
+        "-framerate",std::to_string(decoder.GetFrameRate()),"-threads","1","-thread_queue_size","1","-i","pipe:0"};
     if(hasAudio) {
         args.insert(args.end(),{"-f","s"+std::to_string(audio.bits)+"le","-ar",std::to_string(audio.rate),
             "-ac",std::to_string(audio.channels),"-i",audioFile.string(),"-map","0:v:0","-map","1:a:0","-c:a","pcm_s24le"});
@@ -125,8 +126,9 @@ static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution
         metadata("description",description);
     }
     args.insert(args.end(),{"-movflags","+faststart+use_metadata_tags",partial.string()});
-    ChildProcess encoder;if(!encoder.Start(args,false)){setError(encoder.Error());return false;}
     uint64_t frames=decoder.GetFrameCount();
+    ChildProcess encoder;
+    if(!encoder.Start(args,false)){setError("Could not start video encoder: "+encoder.Error());return false;}
     for(uint64_t i=0;i<frames;i++) {
         if(g_cancel.load())return false;
         int w=0,h=0,stride=0;
@@ -134,11 +136,13 @@ static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution
         if(i==0){pixels=std::move(firstFrame);w=width;h=height;stride=firstStride;}
         else pixels=decoder.DecodeFrameSync(i,&w,&h,&stride,a,scale);
         if(pixels.empty()||w!=width||h!=height||stride!=width*6){setError("Frame "+std::to_string(i)+" could not be decoded: "+decoder.LastError());return false;}
-        if(!encoder.Write(pixels.data(),pixels.size(),30,&g_cancel)){setError(encoder.Error());return false;}
+        if(!encoder.Write(pixels.data(),pixels.size(),30,&g_cancel)) {
+            setError(ExportEncoderError(codec,targetWidth,targetHeight,encoder.Error()));return false;
+        }
         if(progress)progress(clipIndex,totalClips,int(i+1),int(frames),context);
     }
     decoder.Close();encoder.CloseInput();
-    if(!encoder.Wait(60,&g_cancel)){setError(encoder.Error());return false;}
+    if(!encoder.Wait(60,&g_cancel)){setError(ExportEncoderError(codec,targetWidth,targetHeight,encoder.Error()));return false;}
     if(g_cancel.load())return false;
     // The partial file is on the same volume; atomically replace the destination
     // only after encoding succeeds, preserving the previous file on failure.
@@ -152,14 +156,14 @@ extern "C" {
 int braw_export_prepare() {
     std::lock_guard lock(g_stateMutex);
     if(g_running.load())return -1;
-    g_cancel=false;g_error.clear();g_prepared=true;g_running=true;return 0;
+    g_cancel=false;g_error.clear();g_warning.clear();g_prepared=true;g_running=true;return 0;
 }
 int braw_export_start(BrawProjectHandle* project,const int* indices,int count,
     int codec,int profile,int resolution,int rate,const char* outputDir,ExportProgressFn progress,void* context) {
     {
         std::lock_guard lock(g_stateMutex);
         if(g_running.load()&&!g_prepared)return -1;
-        if(!g_prepared){g_cancel=false;g_error.clear();g_running=true;}
+        if(!g_prepared){g_cancel=false;g_error.clear();g_warning.clear();g_running=true;}
         g_prepared=false;
     }
     struct RunningGuard {~RunningGuard(){g_running=false;}} running;
@@ -171,14 +175,34 @@ int braw_export_start(BrawProjectHandle* project,const int* indices,int count,
             if(!clip){setError("A selected clip is no longer available.");return -1;}
             clips.push_back(std::make_unique<ClipOwner>(clip));
         }
+        int exported=0;
         for(int i=0;i<count;i++) {
             if(g_cancel.load())return -2;
             auto* clip=clips[i]->handle;
             std::filesystem::path source(braw_clip_get_filepath(clip));
+            // Native 17K encoding is currently unsupported. Reduced output
+            // presets still use full-resolution RGB16 source decoding.
+            const auto width=braw_clip_get_width(clip),height=braw_clip_get_height(clip);
+            if(resolution==0&&(width>16384||height>16384)) {
+                {
+                    std::lock_guard lock(g_stateMutex);
+                    if(!g_warning.empty())g_warning+='\n';
+                    g_warning+="Skipped "+source.filename().string()+" ("+std::to_string(width)+" × "+std::to_string(height)+"): native 17K export is not supported yet. Choose 4K or 1080p to export this clip.";
+                }
+                if(progress)progress(i,count,1,1,context);
+                continue;
+            }
             std::filesystem::path folder=outputDir&&outputDir[0]?std::filesystem::path(outputDir):source.parent_path();
             auto output=(folder/(source.stem().string()+".mov")).string();
-            if(!exportClip(clip,codec,profile,resolution,rate*1000000,output,progress,context,i,count))return g_cancel.load()?-2:-1;
+            if(!exportClip(clip,codec,profile,resolution,rate*1000000,output,progress,context,i,count)) {
+                if(g_cancel.load())return -2;
+                std::string error=braw_export_last_error();
+                setError(source.filename().string()+" (clip "+std::to_string(i+1)+" of "+std::to_string(count)+"): "+error);
+                return -1;
+            }
+            exported++;
         }
+        if(exported==0&&!g_cancel.load()) {setError("No clips exported. "+std::string(braw_export_last_warning()));return -3;}
     }
     return g_cancel.load()?-2:0;
 }
@@ -186,4 +210,5 @@ int braw_export_is_running(){return g_running.load();}
 void braw_export_cancel(){std::lock_guard lock(g_stateMutex);if(g_running.load())g_cancel=true;}
 void braw_export_reset(){std::lock_guard lock(g_stateMutex);if(!g_running.load())g_cancel=false;}
 const char* braw_export_last_error(){static thread_local std::string error;std::lock_guard lock(g_stateMutex);error=g_error;return error.c_str();}
+const char* braw_export_last_warning(){static thread_local std::string warning;std::lock_guard lock(g_stateMutex);warning=g_warning;return warning.c_str();}
 }

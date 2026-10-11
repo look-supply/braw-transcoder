@@ -21,7 +21,15 @@ struct BrawDecoder::Impl {
            (!payload.empty()&&!child.Write(payload.data(),payload.size(),30,cancel))||
            !child.Read(&response,sizeof(response),30,cancel)) {error=child.Error();return false;}
         if(response.magicValue!=magic||response.size>maxPayload||response.status!=0) {
-            error="Decoder rejected the request: "+child.Error();child.Stop();return false;
+            const std::string operation=request.command==Open?"opening source clip "+path+" on "+(request.metal?"Metal":"CPU"):
+                request.command==Frame?"decoding frame "+std::to_string(request.index):
+                "reading audio at sample "+std::to_string(request.index);
+            if(response.magicValue!=magic)error="Invalid decoder response while "+operation+" (protocol mismatch).";
+            else if(response.size>maxPayload)error="Decoder response exceeded the "+std::to_string(maxPayload/1048576)+" MiB frame limit while "+operation+".";
+            else error="Blackmagic RAW SDK failed while "+operation+" (worker status "+std::to_string(response.status)+").";
+            const auto detail=child.Error();
+            if(!detail.empty())error+='\n'+detail;
+            child.Stop();return false;
         }
         bytes.resize(response.size);
         if(!bytes.empty()&&!child.Read(bytes.data(),bytes.size(),30,cancel)){error=child.Error();return false;}

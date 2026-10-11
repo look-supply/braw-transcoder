@@ -168,6 +168,7 @@ struct InspectorContent: View {
                 
                 GroupBox(label: Text("Highlight Recovery").font(.headline)) {
                     Toggle("Enable", isOn: $clip.highlightRecovery)
+                        .help("Reconstruct clipped highlights. Compare with it off to judge whether recovery improves this shot.")
                         .padding(.vertical, 2)
                         .disabled(isExporting)
                 }

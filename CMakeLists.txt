@@ -50,7 +50,7 @@ add_executable(braw_worker src/worker/main.mm src/worker/SDKDecoder.mm)
 target_include_directories(braw_worker PRIVATE ${CMAKE_SOURCE_DIR}/src ${BRAW_SDK_INCLUDE})
 target_compile_definitions(braw_worker PRIVATE BRAW_SDK_LIBRARY_PATH="${BRAW_SDK_FRAMEWORK_DIR}")
 target_compile_options(braw_worker PRIVATE -fobjc-arc)
-target_link_libraries(braw_worker PRIVATE "-framework Foundation" "-framework Metal"
+target_link_libraries(braw_worker PRIVATE "-framework Foundation" "-framework Metal" "-framework Accelerate"
     "${BRAW_SDK_FRAMEWORK_DIR}/BlackmagicRawAPI.framework")
 
 # ── SwiftUI App Executable ─────────────────────────
@@ -127,7 +127,7 @@ add_dependencies(braw_test braw_worker)
 include(CTest)
 add_executable(braw_reliability_test test/reliability.cpp)
 target_include_directories(braw_reliability_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(braw_reliability_test PRIVATE braw_core)
+target_link_libraries(braw_reliability_test PRIVATE braw_core "-framework Accelerate")
 add_dependencies(braw_reliability_test braw_worker)
 add_test(NAME process_failures COMMAND braw_reliability_test)
 add_executable(braw_color_metadata_test test/export_color_metadata.cpp)
@@ -145,6 +145,8 @@ target_compile_options(braw_model_test PRIVATE
 target_link_libraries(braw_model_test PRIVATE braw_core "-framework AppKit" "-framework CoreFoundation")
 add_dependencies(braw_model_test braw_worker)
 if(EXISTS "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    add_test(NAME highlight_preview COMMAND braw_reliability_test --highlight-preview "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    set_tests_properties(highlight_preview PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 60)
     add_test(NAME adjusted_thumbnails COMMAND braw_model_test "${BRAW_SDK_ROOT}/../Media/sample.braw")
     set_tests_properties(adjusted_thumbnails PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 60)
 endif()

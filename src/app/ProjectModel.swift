@@ -92,7 +92,7 @@ final class ClipModel: Identifiable, ObservableObject {
     @Published var exposure: Float = 0 {
         didSet { if let h = handle { braw_clip_set_exposure(h, exposure) }; schedulePreviewRefresh() }
     }
-    @Published var highlightRecovery = true {
+    @Published var highlightRecovery = false {
         didSet { if let h = handle { braw_clip_set_highlight_recovery(h, highlightRecovery) }; schedulePreviewRefresh() }
     }
     @Published var previewLUT = true {
@@ -199,11 +199,8 @@ final class ClipModel: Identifiable, ObservableObject {
             braw_clip_set_color_temp(h, colorTemp)
             braw_clip_set_tint(h, tint)
         }
-        // Default highlight recovery ON
-        if let h = self.handle, !highlightRecovery {
-            highlightRecovery = true
-            braw_clip_set_highlight_recovery(h, true)
-        }
+        // Keep recovery opt-in: SDK recovery can introduce shadow color
+        // artifacts, so model creation must not force it on.
     }
 
     var nativeWidth: UInt32  { handle.map { braw_clip_get_width($0) } ?? 0 }
@@ -306,7 +303,7 @@ final class ClipModel: Identifiable, ObservableObject {
         iso = nativeISO
         isoPresetIndex = 0
         exposure = 0
-        highlightRecovery = true
+        highlightRecovery = false
         previewLUT = true
         colorTemp = nativeColorTemp
         tint = nativeTint
@@ -315,7 +312,7 @@ final class ClipModel: Identifiable, ObservableObject {
         braw_clip_set_color_temp(h, colorTemp)
         braw_clip_set_tint(h, tint)
         braw_clip_set_exposure(h, exposure)
-        braw_clip_set_highlight_recovery(h, true)
+        braw_clip_set_highlight_recovery(h, false)
         braw_clip_set_preview_lut(h, true)
         schedulePreviewRefresh()
     }
@@ -345,9 +342,14 @@ final class ClipModel: Identifiable, ObservableObject {
         loadRequestID += 1
         let requestID = loadRequestID
         let frameIndex = currentFrame
+        // Display previews need screen-sized pixels, especially for 12K/17K
+        // sources. Export resolution remains independent of this SDK reduction.
+        let longestEdge = max(nativeWidth, nativeHeight)
+        let previewScale: Float = longestEdge > 10240 ? 0.125
+            : longestEdge > 5120 ? 0.25 : longestEdge > 2560 ? 0.5 : 1
         native.setLatest(requestID)
         Task { [weak self, native] in
-            let result = await native.decode(index: frameIndex, scale: 1, request: requestID, analyzeWaveform: true)
+            let result = await native.decode(index: frameIndex, scale: previewScale, request: requestID, analyzeWaveform: true)
             guard let self, self.loadRequestID == requestID else { return }
             self.isLoadingPreview = false
             self.waveform = result.waveform
@@ -523,7 +525,7 @@ private final class ExportOperation: @unchecked Sendable {
          progress: @escaping @Sendable (Int32, Int32, Int32, Int32) -> Void) {
         self.native = native; self.settings = settings; self.progress = progress
     }
-    func run() -> (Int32, String) {
+    func run() -> (Int32, String, String) {
         let indices = settings.selectedIndices.map { Int32($0) }
         let context = Unmanaged.passUnretained(self).toOpaque()
         let result = indices.withUnsafeBufferPointer { buffer in
@@ -534,7 +536,7 @@ private final class ExportOperation: @unchecked Sendable {
                     Unmanaged<ExportOperation>.fromOpaque(raw).takeUnretainedValue().progress(ci, tc, frame, total)
                 }, context)
         }
-        return (result, String(cString: braw_export_last_error()))
+        return (result, String(cString: braw_export_last_error()), String(cString: braw_export_last_warning()))
     }
 }
 
@@ -579,14 +581,17 @@ final class ExportManager: ObservableObject {
             }
         }
         Task { [self, operation] in
-            let (result, error) = await Task.detached(priority: .userInitiated) { operation.run() }.value
+            let (result, error, warning) = await Task.detached(priority: .userInitiated) { operation.run() }.value
             isExporting = false; projectModel.isExporting = false; isCancelling = false
             // Export suspends every preview decoder. Resume the visible clip
             // on success, cancellation, or failure so edits refresh it again.
             projectModel.selectedClip?.loadPreviewFrame()
-            if result == 0 { progress = 1; statusMessage = "Export complete." }
+            if result == 0 { progress = 1; statusMessage = warning.isEmpty ? "Export complete." : "Export complete.\n" + warning }
             else if result == -2 { statusMessage = "Export cancelled." }
-            else { statusMessage = error.isEmpty ? "Export failed." : error }
+            else {
+                statusMessage = error.isEmpty ? "Export failed." : error
+                if !warning.isEmpty && result != -3 { statusMessage = (statusMessage ?? "") + "\n" + warning }
+            }
         }
     }
     func cancel() {

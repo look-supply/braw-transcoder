@@ -48,6 +48,11 @@ int main() {
         } else if(request.command==Audio) {
             if(decoder.ReadAudio(request.index,request.count,payload))response.status=0;
         } else return 2;
+        if(response.status!=0) {
+            fprintf(stderr,"BRAW request failed: command=%u, index=%llu, scale=%.3f\n",
+                request.command,request.index,request.scale);
+            fflush(stderr);
+        }
         response.size=payload.size();
         if(!transfer(&response,sizeof(response),true))return 0;
         if(!payload.empty()&&!transfer(payload.data(),payload.size(),true))return 0;
