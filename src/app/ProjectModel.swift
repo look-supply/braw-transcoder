@@ -11,6 +11,7 @@ private struct DecodedPixels: Sendable {
 }
 private struct DecodeResult: Sendable {
     var pixels: DecodedPixels?
+    var waveform: RGBWaveform?
     var error: String = ""
 }
 private final class NativeClip: @unchecked Sendable {
@@ -18,13 +19,22 @@ private final class NativeClip: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.braw.clip", qos: .userInitiated)
     private let lock = NSLock()
     private var latestRequest: UInt64 = 0
+    private var latestThumbnailRequest: UInt64 = 0
     init(retainedHandle: OpaquePointer) { handle = retainedHandle }
     deinit { braw_clip_close(handle) }
     func setLatest(_ request: UInt64) { lock.withLock { latestRequest = request } }
-    func decode(index: UInt64, scale: Float, request: UInt64? = nil) async -> DecodeResult {
+    func setLatestThumbnail(_ request: UInt64) { lock.withLock { latestThumbnailRequest = request } }
+    func decode(index: UInt64, scale: Float, request: UInt64? = nil, thumbnailRequest: UInt64? = nil, analyzeWaveform: Bool = false) async -> DecodeResult {
         await withCheckedContinuation { continuation in
             queue.async { [self] in
-                if let request, lock.withLock({ latestRequest != request }) {
+                let isStale = { [self] in
+                    lock.withLock {
+                        if let request, latestRequest != request { return true }
+                        if let thumbnailRequest, latestThumbnailRequest != thumbnailRequest { return true }
+                        return false
+                    }
+                }
+                if isStale() {
                     continuation.resume(returning: DecodeResult()); return
                 }
                 var width: Int32 = 0, height: Int32 = 0
@@ -37,7 +47,12 @@ private final class NativeClip: @unchecked Sendable {
                 }
                 let frame = DecodedPixels(data: Data(bytes: pixels, count: Int(width) * Int(height) * 4),
                                           width: Int(width), height: Int(height))
-                continuation.resume(returning: DecodeResult(pixels: frame))
+                if isStale() {
+                    continuation.resume(returning: DecodeResult()); return
+                }
+                let waveform = analyzeWaveform
+                    ? RGBWaveform.analyze(bgra: frame.data, width: frame.width, height: frame.height) : nil
+                continuation.resume(returning: DecodeResult(pixels: frame, waveform: waveform))
             }
         }
     }
@@ -88,12 +103,16 @@ final class ClipModel: Identifiable, ObservableObject {
     }
 
     @Published var thumbnail: NSImage? = nil
+    @Published private(set) var isLoadingThumbnail = false
     @Published var preview: NSImage? = nil
+    @Published var waveform: RGBWaveform?
     @Published var isLoadingPreview = false
     @Published var previewError: String?
 
     private var loadRequestID: UInt64 = 0
     private var pendingRefresh: DispatchWorkItem?
+    private var thumbnailRequestID: UInt64 = 0
+    private var isPreviewActive = false
 
     private var _fileName: String = ""
     var fileName: String { _fileName }
@@ -193,9 +212,14 @@ final class ClipModel: Identifiable, ObservableObject {
     var frameCount: UInt64   { handle.map { braw_clip_get_frame_count($0) } ?? 0 }
 
     func releaseDecoder() {
+        isPreviewActive = false
         loadRequestID += 1
         native.setLatest(loadRequestID)
         pendingRefresh?.cancel()
+        if pendingRefresh != nil {
+            pendingRefresh = nil
+            loadThumbnail(force: true)
+        }
         native.releaseDecoder()
         isLoadingPreview = false
     }
@@ -210,17 +234,22 @@ final class ClipModel: Identifiable, ObservableObject {
         braw_clip_set_preview_lut(h, previewLUT)
     }
 
-    func loadThumbnail() {
-        guard !thumbnailLoaded else { return }
+    func loadThumbnail(force: Bool = false) {
+        guard force || !thumbnailLoaded else { return }
         thumbnailLoaded = true
+        isLoadingThumbnail = true
+        thumbnailRequestID += 1
+        let requestID = thumbnailRequestID
+        native.setLatestThumbnail(requestID)
         Task { [weak self, native] in
-            let result = await native.decode(index: 0, scale: 0.25)
-            guard let self else { return }
+            let result = await native.decode(index: 0, scale: 0.25, thumbnailRequest: requestID)
+            guard let self, self.thumbnailRequestID == requestID else { return }
+            self.isLoadingThumbnail = false
             if let pixels = result.pixels {
                 self.thumbnail = makeNSImageBGRA(frame: pixels)
             } else { self.thumbnailLoaded = false }
             // Thumbnails do not need a persistent SDK process.
-            native.releaseDecoder()
+            if !self.isPreviewActive { native.releaseDecoder() }
         }
     }
 
@@ -280,15 +309,25 @@ final class ClipModel: Identifiable, ObservableObject {
     }
 
     func schedulePreviewRefresh() {
+        isLoadingPreview = isPreviewActive
+        loadRequestID += 1
+        native.setLatest(loadRequestID)
+        thumbnailRequestID += 1
+        native.setLatestThumbnail(thumbnailRequestID)
+        isLoadingThumbnail = true
         pendingRefresh?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.loadPreviewFrame()
+            guard let self else { return }
+            self.pendingRefresh = nil
+            if self.isPreviewActive { self.loadPreviewFrame() }
+            self.loadThumbnail(force: true)
         }
         pendingRefresh = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
     func loadPreviewFrame() {
+        isPreviewActive = true
         isLoadingPreview = true
         previewError = nil
         loadRequestID += 1
@@ -296,9 +335,10 @@ final class ClipModel: Identifiable, ObservableObject {
         let frameIndex = currentFrame
         native.setLatest(requestID)
         Task { [weak self, native] in
-            let result = await native.decode(index: frameIndex, scale: 1, request: requestID)
+            let result = await native.decode(index: frameIndex, scale: 1, request: requestID, analyzeWaveform: true)
             guard let self, self.loadRequestID == requestID else { return }
             self.isLoadingPreview = false
+            self.waveform = result.waveform
             if let pixels = result.pixels { self.preview = makeNSImageBGRA(frame: pixels) }
             else if !result.error.isEmpty { self.previewError = result.error }
         }

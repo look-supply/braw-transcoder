@@ -187,11 +187,12 @@ int main(int argc,char** argv) {
                 decoder.GetFrameCount()/double(decoder.GetFrameRate()),audio.rate,audio.channels,audio.bits,audio.samples);return 0;
         }
         if(argc>1&&std::string(argv[1])=="--export") {
-            require(argc==6,"Usage: --export cpu|metal clip output-directory resolution");
+            require(argc==6||argc==7,"Usage: --export cpu|metal clip output-directory resolution [codec: 0=H264, 1=HEVC, 2=ProRes]");
             setenv("BRAW_DECODE_PIPELINE",argv[2],1);fs::create_directories(argv[4]);
             auto* project=braw_project_create();require(braw_project_import(project,argv[3])==0,"Import failed");
             int index=0;uint64_t peak=0;auto start=std::chrono::steady_clock::now();
-            int result=braw_export_start(project,&index,1,1,3,std::stoi(argv[5]),100,argv[4],
+            int codec=argc==7?std::stoi(argv[6]):1;
+            int result=braw_export_start(project,&index,1,codec,3,std::stoi(argv[5]),100,argv[4],
                 [](int,int,int frame,int total,void* ctx){
                     auto& peak=*static_cast<uint64_t*>(ctx);peak=std::max(peak,ChildProcess::ChildrenMemory());
                     if(frame==1||frame%250==0||frame==total)printf("%d/%d frames; children %.0f MiB; peak %.0f MiB\n",

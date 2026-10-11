@@ -25,6 +25,7 @@ endif()
 add_library(braw_core STATIC
     src/core/BrawDecoder.mm
     src/core/ChildProcess.cpp
+    src/core/QuickTimeMetadata.cpp
     src/bridge/braw_api.cpp
     src/bridge/braw_export.mm
 )
@@ -56,10 +57,12 @@ target_link_libraries(braw_worker PRIVATE "-framework Foundation" "-framework Me
 add_executable(${PROJECT_NAME}
     src/app/BrawTranscoderApp.swift
     src/app/ProjectModel.swift
+    src/app/RGBWaveform.swift
     src/app/Views/ContentView.swift
     src/app/Views/SidebarView.swift
     src/app/Views/PreviewView.swift
     src/app/Views/InspectorView.swift
+    src/app/Views/RGBWaveformView.swift
     src/app/Views/ExportView.swift
     src/app/Info.plist
 )
@@ -127,3 +130,21 @@ target_include_directories(braw_reliability_test PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_link_libraries(braw_reliability_test PRIVATE braw_core)
 add_dependencies(braw_reliability_test braw_worker)
 add_test(NAME process_failures COMMAND braw_reliability_test)
+add_executable(braw_color_metadata_test test/export_color_metadata.cpp)
+target_include_directories(braw_color_metadata_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME export_color_metadata COMMAND braw_color_metadata_test)
+add_executable(braw_quicktime_metadata_test test/quicktime_metadata.cpp src/core/QuickTimeMetadata.cpp)
+target_include_directories(braw_quicktime_metadata_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME quicktime_metadata COMMAND braw_quicktime_metadata_test)
+add_executable(braw_waveform_test test/waveform.swift src/app/RGBWaveform.swift)
+add_test(NAME rgb_waveform COMMAND braw_waveform_test)
+add_executable(braw_model_test test/adjusted_thumbnails.swift src/app/ProjectModel.swift src/app/RGBWaveform.swift)
+target_include_directories(braw_model_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(braw_model_test PRIVATE
+    "SHELL:-import-objc-header ${CMAKE_SOURCE_DIR}/src/bridge/braw_api.h")
+target_link_libraries(braw_model_test PRIVATE braw_core "-framework AppKit" "-framework CoreFoundation")
+add_dependencies(braw_model_test braw_worker)
+if(EXISTS "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    add_test(NAME adjusted_thumbnails COMMAND braw_model_test "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    set_tests_properties(adjusted_thumbnails PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 60)
+endif()

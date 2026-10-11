@@ -2,6 +2,8 @@
 #include "core/Types.h"
 #include "core/BrawDecoder.h"
 #include "core/ChildProcess.h"
+#include "core/ExportColorMetadata.h"
+#include "core/QuickTimeMetadata.h"
 #import <Foundation/Foundation.h>
 #include <atomic>
 #include <mutex>
@@ -92,7 +94,30 @@ static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution
     if(codec==0)args.insert(args.end(),{"-c:v","h264_videotoolbox","-tag:v","avc1","-pix_fmt","yuv420p","-b:v",std::to_string(bitrate)});
     else if(codec==1)args.insert(args.end(),{"-c:v","hevc_videotoolbox","-tag:v","hvc1","-pix_fmt","p010le","-b:v",std::to_string(bitrate)});
     else args.insert(args.end(),{"-c:v","prores_ks","-profile:v",std::to_string(profile),"-pix_fmt",profile>=4?"yuva444p10le":"yuv422p10le","-threads","4"});
-    args.insert(args.end(),{"-movflags","+faststart",partial.string()});
+    // Preserve the SDK-reported source encoding without mapping proprietary
+    // Blackmagic gamuts or Film curves to unrelated standard NCLC code points.
+    // Descriptive source values remain available for unsupported encodings.
+    // Supported camera encodings also receive the vendor's QuickTime keys.
+    const auto gamma=decoder.GetClipGamma();
+    const auto gamut=decoder.GetClipGamut();
+    const auto generation=decoder.GetColorScienceGen();
+    const auto camera=decoder.GetCameraType();
+    auto metadata=[&](const std::string& key,const std::string& value) {
+        if(!value.empty())args.insert(args.end(),{"-metadata",key+"="+value});
+    };
+    metadata("com.brawtranscoder.source.gamma",gamma);
+    metadata("com.brawtranscoder.source.gamut",gamut);
+    metadata("com.brawtranscoder.source.camera_type",camera);
+    if(generation)metadata("com.brawtranscoder.source.color_science_generation",std::to_string(generation));
+    metadata("com.brawtranscoder.source.filename",fs::path(braw_clip_get_filepath(clip)).filename().string());
+    for(const auto& [key,value]:BlackmagicFilmMetadata(gamma,gamut,generation,camera))
+        metadata(key,value);
+    if(!gamma.empty()||!gamut.empty()) {
+        std::string description="Source BRAW: gamut="+gamut+"; gamma="+gamma;
+        if(generation)description+="; color science generation="+std::to_string(generation);
+        metadata("description",description);
+    }
+    args.insert(args.end(),{"-movflags","+faststart+use_metadata_tags",partial.string()});
     ChildProcess encoder;if(!encoder.Start(args,false)){setError(encoder.Error());return false;}
     uint64_t frames=decoder.GetFrameCount();
     for(uint64_t i=0;i<frames;i++) {
@@ -110,6 +135,9 @@ static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution
     if(g_cancel.load())return false;
     // The partial file is on the same volume; atomically replace the destination
     // only after encoding succeeds, preserving the previous file on failure.
+    std::string metadataError;
+    if(!PromoteQuickTimeMetadata(partial.string(),metadataError)){setError(metadataError);return false;}
+    if(g_cancel.load())return false;
     if(rename(partial.c_str(),final.c_str())!=0){setError("Could not publish output: "+output+" ("+std::strerror(errno)+").");return false;}
     return true;
 }

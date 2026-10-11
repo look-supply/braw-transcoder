@@ -212,46 +212,48 @@ struct ClipRowView: View {
                 .foregroundColor(isActive ? .accentColor : .primary)
             
             // Thumbnail
-            ZStack {
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(isActive
-                        ? Color.accentColor.opacity(0.12)
-                        : Color.black.opacity(0.22))
-                
-                if let thumb = clip.thumbnail {
-                    Image(nsImage: thumb)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                } else {
-                    VStack(spacing: 4) {
-                        ProgressView().scaleEffect(0.7)
-                        Text("Loading...")
-                            .font(.system(size: 9))
-                            .foregroundColor(.secondary)
-                    }
-                }
-                
-                // Selection checkmark
-                if isSelected && !isActive {
-                    VStack {
-                        HStack {
-                            Spacer()
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.accentColor)
-                                .background(Circle().fill(Color.white).frame(width: 14, height: 14))
-                                .font(.system(size: 16))
-                                .padding(4)
+            // Size the container before adding its content. An image or loading
+            // indicator must not change the row's width-to-height ratio.
+            RoundedRectangle(cornerRadius: 5)
+                .fill(isActive
+                    ? Color.accentColor.opacity(0.12)
+                    : Color.black.opacity(0.22))
+                .aspectRatio(thumbnailAspectRatio, contentMode: .fit)
+                .overlay {
+                    if let thumb = clip.thumbnail {
+                        Image(nsImage: thumb)
+                            .resizable()
+                            .aspectRatio(thumbnailAspectRatio, contentMode: .fit)
+                    } else {
+                        VStack(spacing: 4) {
+                            ProgressView().scaleEffect(0.7)
+                            Text("Loading...")
+                                .font(.system(size: 9))
+                                .foregroundColor(.secondary)
                         }
-                        Spacer()
                     }
                 }
-            }
-            .aspectRatio(thumbnailAspectRatio, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 5))
-            .overlay {
-                RoundedRectangle(cornerRadius: 5)
-                    .strokeBorder(isActive ? Color.accentColor : isSelected ? Color.secondary : Color.clear, lineWidth: 2)
-            }
+                .overlay {
+                    // Selection checkmark
+                    if isSelected && !isActive {
+                        VStack {
+                            HStack {
+                                Spacer()
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.accentColor)
+                                    .background(Circle().fill(Color.white).frame(width: 14, height: 14))
+                                    .font(.system(size: 16))
+                                    .padding(4)
+                            }
+                            Spacer()
+                        }
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5)
+                        .strokeBorder(isActive ? Color.accentColor : isSelected ? Color.secondary : Color.clear, lineWidth: 2)
+                }
             
             // Metadata
             Text("\(clip.nativeWidth)×\(clip.nativeHeight)  \(String(format: "%.1f", clip.frameRate))fps  \(clip.frameCount)f")
@@ -259,6 +261,7 @@ struct ClipRowView: View {
                 .foregroundColor(.secondary)
                 .lineLimit(1)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(isActive ? Color.accentColor.opacity(0.06) : Color.clear)

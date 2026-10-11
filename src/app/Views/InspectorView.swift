@@ -16,6 +16,8 @@ struct InspectorView: View {
             
             if let clip = project.selectedClip {
                 InspectorContent(clip: clip, project: project)
+                Divider()
+                RGBWaveformView(clip: clip)
             } else {
                 Spacer()
                 VStack(spacing: 8) {
