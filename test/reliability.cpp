@@ -2,6 +2,7 @@
 #include "core/BrawDecoder.h"
 #include "core/ChildProcess.h"
 #include "core/ExportEncoderError.h"
+#include "core/ExportAudio.h"
 #include "worker/Protocol.h"
 #include <Accelerate/Accelerate.h>
 #include <chrono>
@@ -18,7 +19,32 @@ namespace fs=std::filesystem;
 static void require(bool ok,const std::string& message){if(!ok)throw std::runtime_error(message);}
 static std::string temporary(){char path[]="/tmp/braw-reliability-XXXXXX";char* p=mkdtemp(path);require(p,"mkdtemp failed");return p;}
 struct Directory{std::string path=temporary();~Directory(){std::error_code e;fs::remove_all(path,e);}};
+static void resolutionDimensions() {
+    struct Case { int mode, w, h, expectedW, expectedH; };
+    const Case cases[] = {
+        {5,12288,6480,8192,4320}, {6,12288,6480,6144,3240},
+        {6,6144,2592,6144,2592}, {6,4096,2304,4096,2304}, {5,7680,3204,7680,3204},
+        {5,6144,3456,6144,3456}, {5,6048,4032,6048,4032},
+        {5,1920,1080,1920,1080}, {1,1920,1080,1920,1080},
+        {3,640,480,640,480}, {1,5184,2160,5184,2160},
+        {1,12288,6480,4096,2160}, {3,12288,6480,2048,1080},
+        {5,6480,12288,2278,4320}, {0,12288,6480,12288,6480},
+        {2,12288,6480,4096,2160}, {4,12288,6480,2048,1080}
+    };
+    for (const auto& c : cases) {
+        int w=0,h=0;
+        require(braw_export_dimensions(c.mode,c.w,c.h,&w,&h),"Resolution calculation failed");
+        require(w==c.expectedW && h==c.expectedH,"Unexpected output dimensions");
+        require(w<=c.w && h<=c.h,"Export would upscale");
+        require(std::abs(double(w)-double(c.w)*h/c.h)<=1.0,"Aspect ratio changed beyond pixel rounding");
+    }
+    int w=0,h=0;
+    require(!braw_export_dimensions(7,1920,1080,&w,&h),"Invalid mode accepted");
+    require(!braw_export_dimensions(5,0,1080,&w,&h),"Invalid source accepted");
+    puts("PASS: 4320/2160/1080 ceilings, original sizes, aspect ratio, legacy modes, and no upscaling");
+}
 static void processes() {
+    resolutionDimensions();
     {
         BrawDecoder decoder;
         require(!decoder.OpenClip("/missing.braw"),"Missing source accepted");
@@ -28,7 +54,7 @@ static void processes() {
                 "Source-open failure omitted operation or SDK detail: "+error);
     }
     const auto unsupported=ExportEncoderError(1,17520,8040,"Processing worker exited or closed its channel\nCannot prepare encoder: -12902");
-    require(unsupported.find("17520 × 8040")!=std::string::npos&&unsupported.find("Choose 4K or 1080p")!=std::string::npos&&unsupported.find("full resolution")!=std::string::npos,"Missing actionable encoder initialization error");
+    require(unsupported.find("17520 × 8040")!=std::string::npos&&unsupported.find("Choose a smaller height preset")!=std::string::npos&&unsupported.find("full resolution")!=std::string::npos,"Missing actionable encoder initialization error");
     require(ExportEncoderError(1,4096,2160,"Cancelled").find("unsupported")==std::string::npos,"Cancellation reported as unsupported dimensions");
     auto exe=SiblingExecutable("braw_reliability_test");char byte;
     {
@@ -213,12 +239,112 @@ static void lutToggle(const char* path) {
     require(off==offAgain,"Disabling LUT did not restore original pixels");
     printf("PASS: embedded LUT off/on/off changes pixels and restores ungraded preview (%dx%d, %s)\n",w,h,decoder.UsingMetal()?"Metal":"CPU");
 }
+static void resolutionExport(const char* sample) {
+    Directory dir;
+    auto* project=braw_project_create();
+    require(braw_project_import(project,sample)==0,"Resolution fixture import failed");
+    auto* clip=braw_project_get_clip(project,0);
+    require(braw_clip_get_frame_count(clip)==1,"Use a one-frame resolution fixture");
+    for (int codec : {1,2}) for (int mode : {5,6,3}) {
+        auto folder=fs::path(dir.path)/(std::to_string(codec)+"-"+std::to_string(mode));
+        fs::create_directory(folder);int index=0;
+        require(braw_export_start(project,&index,1,codec,3,mode,100,folder.c_str(),nullptr,nullptr)==0,
+                "Resolution export failed: "+std::string(braw_export_last_error()));
+        auto output=folder/(fs::path(sample).stem().string()+".mov");
+        auto bitmap=folder/"frame.bmp";
+        ChildProcess ffmpeg;
+        require(ffmpeg.Start({SiblingExecutable("ffmpeg"),"-hide_banner","-loglevel","error","-threads","2",
+                "-i",output.string(),"-frames:v","1","-c:v","bmp",bitmap.string()},false),ffmpeg.Error());
+        ffmpeg.CloseInput();require(ffmpeg.Wait(30),ffmpeg.Error());
+        std::ifstream file(bitmap,std::ios::binary);char header[26]{};file.read(header,sizeof(header));
+        int32_t w=0,h=0;memcpy(&w,header+18,4);memcpy(&h,header+22,4);
+        int expectedW=0,expectedH=0;
+        require(braw_export_dimensions(mode,braw_clip_get_width(clip),braw_clip_get_height(clip),&expectedW,&expectedH),"Bad dimensions");
+        require(w==expectedW&&std::abs(h)==expectedH,"Encoded dimensions differ from displayed dimensions");
+        printf("PASS: %s mode %d encoded %d × %d\n",codec==1?"HEVC":"ProRes",mode,w,std::abs(h));
+    }
+    braw_project_destroy(project);
+}
+static std::vector<uint8_t> readBytes(const fs::path& path) {
+    std::ifstream file(path,std::ios::binary);
+    require(bool(file),"Cannot read "+path.string());
+    return {std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
+}
+static void verifyAudio(const fs::path& mov,const fs::path& folder,const std::vector<uint8_t>& source,
+                        uint32_t channels,uint32_t rate,uint32_t bits) {
+    auto raw=folder/"decoded.pcm",wave=folder/"decoded.wav";
+    const auto format="s"+std::to_string(bits)+"le";
+    for (bool wav : {false,true}) {
+        ChildProcess ffmpeg;
+        require(ffmpeg.Start({SiblingExecutable("ffmpeg"),"-hide_banner","-loglevel","error","-i",mov.string(),
+                "-map","0:a:0","-c:a","copy","-f",wav?"wav":format,(wav?wave:raw).string()},false),ffmpeg.Error());
+        ffmpeg.CloseInput();require(ffmpeg.Wait(30),ffmpeg.Error());
+    }
+    require(readBytes(raw)==source,"Audio sample bytes changed or channels dropped/reordered");
+    auto wav=readBytes(wave);bool found=false;
+    auto u16=[&](size_t i){return uint32_t(wav[i])|(uint32_t(wav[i+1])<<8);};
+    auto u32=[&](size_t i){return u16(i)|(u16(i+2)<<16);};
+    for (size_t i=12;i+8<=wav.size();) {
+        const uint32_t size=u32(i+4);
+        if (memcmp(wav.data()+i,"fmt ",4)==0) {
+            require(size>=16&&i+8+size<=wav.size(),"Invalid WAV format");
+            require(u16(i+10)==channels&&u32(i+12)==rate&&u16(i+22)==bits,"MOV audio format differs from source");
+            found=true;break;
+        }
+        i+=8+uint64_t(size)+(size&1);
+    }
+    require(found,"Missing audio format");
+}
+static void multichannelAudio(const char* sample) {
+    Directory dir;
+    for (uint32_t channels : {1u,2u,4u,8u,16u}) for (uint32_t bits : {16u,24u,32u}) {
+        auto folder=fs::path(dir.path)/(std::to_string(channels)+"-"+std::to_string(bits));fs::create_directory(folder);
+        std::vector<uint8_t> pcm;
+        // Different signed sample patterns in every channel, including the low
+        // bits of 32-bit PCM, expose remixing, reordering and bit-depth loss.
+        for (uint32_t frame=0;frame<2400;frame++) for(uint32_t channel=0;channel<channels;channel++) {
+            uint32_t value=(frame*7919+channel*104729)^0xa5a5a5a5;
+            for(uint32_t byte=0;byte<bits/8;byte++)pcm.push_back(uint8_t(value>>(byte*8)));
+        }
+        auto audio=folder/"source.pcm";
+        {std::ofstream file(audio,std::ios::binary);file.write((const char*)pcm.data(),pcm.size());}
+        auto mov=folder/"output.mov";
+        std::vector<std::string> args={SiblingExecutable("ffmpeg"),"-hide_banner","-loglevel","error",
+            "-f","rawvideo","-pixel_format","rgb24","-video_size","64x64","-framerate","24","-i","pipe:0"};
+        auto audioArgs=ExportAudioArguments(48000,channels,bits,audio.string());args.insert(args.end(),audioArgs.begin(),audioArgs.end());
+        args.insert(args.end(),{"-c:v","prores_ks","-profile:v","0","-pix_fmt","yuv422p10le","-threads","1",mov.string()});
+        ChildProcess ffmpeg;require(ffmpeg.Start(args,false),ffmpeg.Error());std::vector<uint8_t> frame(64*64*3);
+        require(ffmpeg.Write(frame.data(),frame.size()),ffmpeg.Error());ffmpeg.CloseInput();require(ffmpeg.Wait(30),ffmpeg.Error());
+        verifyAudio(mov,folder,pcm,channels,48000,bits);
+        printf("PASS: %u-channel %u-bit MOV audio is byte-identical\n",channels,bits);
+    }
+    BrawDecoder decoder;require(decoder.OpenClip(sample),decoder.LastError());auto info=decoder.GetAudioInfo();
+    require(info.samples&&info.channels,"Real BRAW fixture has no audio");std::vector<uint8_t> source;
+    for(uint64_t start=0;start<info.samples;) {
+        uint32_t count=std::min<uint64_t>(65536,info.samples-start);std::vector<uint8_t> chunk;
+        require(decoder.ReadAudio(start,count,chunk),decoder.LastError());source.insert(source.end(),chunk.begin(),chunk.end());start+=count;
+    }
+    decoder.Close();auto* project=braw_project_create();require(braw_project_import(project,sample)==0,"Audio fixture import failed");
+    for (int codec : {0,1,2}) {
+        auto folder=fs::path(dir.path)/("real-braw-"+std::to_string(codec));fs::create_directory(folder);int index=0;
+        require(braw_export_start(project,&index,1,codec,0,3,100,folder.c_str(),nullptr,nullptr)==0,braw_export_last_error());
+        verifyAudio(folder/(fs::path(sample).stem().string()+".mov"),folder,source,info.channels,info.rate,info.bits);
+        printf("PASS: real BRAW exported PCM matches SDK audio exactly (codec %d)\n",codec);
+    }
+    braw_project_destroy(project);
+}
 int main(int argc,char** argv) {
     setvbuf(stdout,nullptr,_IOLBF,0);
     if(argc>1&&std::string(argv[1])=="--hang"){while(true)pause();}
     if(argc>1&&std::string(argv[1])=="--crash")_exit(17);
     if(argc>1&&std::string(argv[1])=="--allocate"){std::vector<uint8_t> memory(128*1024*1024,42);while(true)pause();}
     try {
+        if(argc>1&&std::string(argv[1])=="--multichannel-audio") {
+            require(argc==3,"Usage: --multichannel-audio clip-with-audio");multichannelAudio(argv[2]);return 0;
+        }
+        if(argc>1&&std::string(argv[1])=="--resolution-export") {
+            require(argc==3,"Usage: --resolution-export one-frame-clip");resolutionExport(argv[2]);return 0;
+        }
         if(argc>1&&std::string(argv[1])=="--highlight-preview") {
             require(argc==3,"Usage: --highlight-preview clip");highlightPreview(argv[2]);return 0;
         }
@@ -249,7 +375,50 @@ int main(int argc,char** argv) {
             require(decoder.OpenClip(argv[2]),decoder.LastError());auto audio=decoder.GetAudioInfo();
             printf("SDK %s; %ux%u; %.6f fps; %llu frames; %.2f seconds; audio %u Hz, %u channels, %u bits, %llu samples\n",
                 decoder.SDKVersion().c_str(),decoder.GetWidth(),decoder.GetHeight(),decoder.GetFrameRate(),decoder.GetFrameCount(),
-                decoder.GetFrameCount()/double(decoder.GetFrameRate()),audio.rate,audio.channels,audio.bits,audio.samples);return 0;
+                decoder.GetFrameCount()/double(decoder.GetFrameRate()),audio.rate,audio.channels,audio.bits,audio.samples);
+            printf("As-shot ISO %u; read-only %d; supported:",decoder.GetNativeISO(),decoder.ISOIsReadOnly());for(auto iso:decoder.GetISOList())printf(" %u",iso);puts("");return 0;
+        }
+        if(argc>1&&std::string(argv[1])=="--iso") {
+            require(argc==3,"Usage: --iso clip");
+            BrawDecoder decoder;require(decoder.OpenClip(argv[2]),decoder.LastError());
+            auto list=decoder.GetISOList();require(!list.empty(),"Missing ISO capabilities");
+            auto* clip=braw_clip_open(argv[2]);require(clip,"Clip import failed");
+            require(int(list.size())==braw_clip_get_iso_count(clip),"Bridge ISO list differs from SDK");
+            for(size_t i=0;i<list.size();i++)require(list[i]==braw_clip_get_iso_at(clip,int(i)),"Bridge ISO value differs from SDK");
+            ClipAdjustments a;a.iso=decoder.GetNativeISO();a.colorTemp=decoder.GetNativeColorTemp();a.tint=decoder.GetNativeTint();a.previewLUT=false;
+            int w=0,h=0,stride=0;
+            const auto native=decoder.DecodeFrameSync(0,&w,&h,&stride,a,.125f);require(!native.empty(),decoder.LastError());
+            if(!decoder.ISOIsReadOnly())for(auto iso:{list.front(),list.back()}) {
+                a.iso=iso;const auto pixels=decoder.DecodeFrameSync(0,&w,&h,&stride,a,.125f);
+                require(!pixels.empty(),decoder.LastError());if(iso!=decoder.GetNativeISO())require(pixels!=native,"Supported ISO produced no pixel change: "+std::to_string(iso));
+                braw_clip_set_iso(clip,iso);require(braw_clip_get_iso(clip)==iso,"Valid ISO was not retained in settings");
+            }
+            a.iso=UINT32_MAX;require(decoder.DecodeFrameSync(0,&w,&h,&stride,a,.125f).empty(),"Unsupported ISO decoded silently");
+            require(decoder.LastError().find("not supported")!=std::string::npos,"Missing unsupported ISO explanation");
+            braw_clip_set_iso(clip,UINT32_MAX);require(braw_clip_get_iso(clip)==decoder.GetNativeISO(),"Invalid ISO did not normalize to as-shot");
+            // Verify the RGB16 format used by exports also honors ISO.
+            decoder.Close();decoder.SetOutputFormat(1);require(decoder.OpenClip(argv[2]),decoder.LastError());
+            a.iso=decoder.GetNativeISO();const auto rgbNative=decoder.DecodeFrameSync(0,&w,&h,&stride,a,.125f);require(!rgbNative.empty()&&stride==w*6,"Export RGB16 baseline failed");
+            if(!decoder.ISOIsReadOnly()) {
+                a.iso=list.front()==a.iso?list.back():list.front();
+                const auto rgbAdjusted=decoder.DecodeFrameSync(0,&w,&h,&stride,a,.125f);
+                require(!rgbAdjusted.empty(),decoder.LastError());if(a.iso!=decoder.GetNativeISO())require(rgbAdjusted!=rgbNative,"ISO did not change export RGB16 pixels");
+            }
+            if(decoder.GetFrameCount()==1&&!decoder.ISOIsReadOnly()&&list.front()!=list.back()) {
+                Directory dir;auto* project=braw_project_create();require(braw_project_import(project,argv[2])==0,"Export fixture import failed");
+                std::vector<std::string> decoded;
+                for(auto iso:{list.front(),list.back()}) {
+                    auto folder=fs::path(dir.path)/std::to_string(iso);fs::create_directory(folder);
+                    braw_clip_set_iso(braw_project_get_clip(project,0),iso);int index=0;
+                    require(braw_export_start(project,&index,1,2,3,0,100,folder.c_str(),nullptr,nullptr)==0,"Adjusted export failed: "+std::string(braw_export_last_error()));
+                    auto output=folder/(fs::path(argv[2]).stem().string()+".mov");auto raw=folder/"frame.bgra";
+                    ChildProcess ffmpeg;require(ffmpeg.Start({SiblingExecutable("ffmpeg"),"-hide_banner","-loglevel","error","-threads","2","-i",output.string(),"-map","0:v:0","-frames:v","1","-pix_fmt","bgra","-f","rawvideo",raw.string()},false),ffmpeg.Error());ffmpeg.CloseInput();require(ffmpeg.Wait(30),ffmpeg.Error());
+                    std::ifstream file(raw,std::ios::binary);decoded.emplace_back(std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>());
+                    require(decoded.back().size()==uint64_t(decoder.GetWidth())*decoder.GetHeight()*4,"Wrong exported frame dimensions");
+                }
+                require(decoded[0]!=decoded[1],"Exported MOV pixels ignored ISO adjustment");braw_project_destroy(project);
+            }
+            braw_clip_close(clip);printf("PASS: clip ISO list, supported preview/export pixel changes, unsupported ISO rejection (%u–%u, read-only %d)\n",list.front(),list.back(),decoder.ISOIsReadOnly());return 0;
         }
         if(argc>1&&(std::string(argv[1])=="--export"||std::string(argv[1])=="--export-folder")) {
             require(argc==6||argc==7,"Usage: --export cpu|metal clip output-directory resolution [codec: 0=H264, 1=HEVC, 2=ProRes]");

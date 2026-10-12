@@ -26,6 +26,8 @@ public:
     float GetFrameRate() const;
     uint64_t GetFrameCount() const;
     uint32_t GetNativeISO() const;
+    std::vector<uint32_t> GetISOList() const;
+    bool ISOIsReadOnly() const;
     uint32_t GetNativeColorTemp() const;
     int16_t GetNativeTint() const;
     float GetNativeExposure() const;

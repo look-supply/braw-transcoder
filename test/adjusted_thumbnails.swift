@@ -34,6 +34,9 @@ struct AdjustedThumbnailTests {
         }
         try await waitUntil { !project.isImporting }
         precondition(project.importError == nil && project.clipCount == 2, "Import failed")
+        // Imports complete asynchronously; selection/export indices refer to
+        // the actual project order, not the order tasks were submitted.
+        paths = (0..<2).map { String(cString: braw_clip_get_filepath(braw_project_get_clip(project.projectHandle, Int32($0)))) } + [paths[2]]
         let inactive = project.getClip(at: 0)!
         let active = project.getClip(at: 1)!
         precondition(!active.highlightRecovery && !inactive.highlightRecovery, "Imports forced highlight recovery on")
@@ -44,6 +47,21 @@ struct AdjustedThumbnailTests {
         let baseline = pixels(active.thumbnail)
         let previewBaseline = pixels(active.preview)
         let inactivePreview = inactive.preview
+        precondition(active.isoPresets.count == Int(braw_clip_get_iso_count(braw_project_get_clip(project.projectHandle, 1))), "Inspector ISO list differs from clip capabilities")
+        if !active.isoReadOnly, let adjustedISO = active.isoPresets.first(where: { $0 != active.nativeISO }) {
+            active.applyISOPreset(active.isoPresets.firstIndex(of: adjustedISO)! + 1)
+            try await waitUntil { !active.isLoadingPreview && !active.isLoadingThumbnail }
+            precondition(pixels(active.thumbnail) != baseline && pixels(active.preview) != previewBaseline,
+                         "ISO did not refresh thumbnail and main preview")
+            active.iso = active.nativeISO
+            try await waitUntil { !active.isLoadingPreview && !active.isLoadingThumbnail }
+            precondition(pixels(active.thumbnail) == baseline && active.isoPresetIndex == 0, "As Shot ISO did not restore preview")
+            active.iso = UInt32.max
+            precondition(active.iso == active.nativeISO && active.isoAdjustmentNotice != nil, "Unsupported ISO left inspector inconsistent")
+            active.iso = active.nativeISO
+            precondition(active.isoAdjustmentNotice == nil, "ISO notice did not clear")
+            try await waitUntil { !active.isLoadingPreview && !active.isLoadingThumbnail }
+        }
 
         active.exposure = 2
         try await waitUntil { !active.isLoadingPreview && !active.isLoadingThumbnail }
@@ -69,7 +87,7 @@ struct AdjustedThumbnailTests {
         // assets), and verify both native values and inspector preset labels.
         precondition(braw_project_import(project.projectHandle, paths[2]) == 2)
         project.clipCount = 3
-        active.iso = 1250
+        active.iso = active.isoPresets.first(where: { $0 != active.nativeISO }) ?? active.nativeISO
         active.colorTemp = 6100
         active.tint = -7
         active.highlightRecovery = false
@@ -87,7 +105,7 @@ struct AdjustedThumbnailTests {
                          "Apply to All lost adjustments")
             precondition(target.colorPresetIndex == ClipModel.colorPresetLabels.count - 1,
                          "Apply to All left white balance labeled As Shot")
-            precondition(target.isoPresetIndex == (target.nativeISO == 1250 ? 0 : ClipModel.isoPresets.firstIndex(of: 1250)! + 1),
+            precondition(target.isoPresetIndex == (target.nativeISO == active.iso ? 0 : target.isoPresets.firstIndex(of: active.iso)! + 1),
                          "Apply to All left a stale ISO preset")
             let nativeSettings = braw_clip_get_settings(braw_project_get_clip(project.projectHandle, target === inactive ? 0 : 2))
             precondition(nativeSettings.temperature == 6100 && nativeSettings.tint == -7 && !nativeSettings.highlightRecovery,
@@ -153,7 +171,7 @@ struct AdjustedThumbnailTests {
         precondition(exporter.totalClips == 2 && exporter.statusMessage == "Export complete.", "Selected export failed")
         for (index, path) in paths.enumerated() {
             let mov = URL(fileURLWithPath: path).deletingPathExtension().appendingPathExtension("mov")
-            precondition(FileManager.default.fileExists(atPath: mov.path) == (index != 1), "Selected export included an unselected clip")
+            precondition(FileManager.default.fileExists(atPath: mov.path) == (index != 1), "Selected export output mismatch at index \(index), selected \(project.selectedIndices), path \(mov.path)")
         }
         let survivor = project.getClip(at: 1)!
         for index in project.selectedIndices.sorted(by: >) { project.removeClip(at: index) }

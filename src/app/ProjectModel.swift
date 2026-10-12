@@ -81,7 +81,17 @@ final class ClipModel: Identifiable, ObservableObject {
     private var handle: OpaquePointer? { native.handle }
 
     @Published var iso: UInt32 = 800 {
-        didSet { if let h = handle { braw_clip_set_iso(h, iso) }; schedulePreviewRefresh() }
+        didSet {
+            let requestedISO = iso
+            if let h = handle {
+                braw_clip_set_iso(h, iso)
+                let appliedISO = braw_clip_get_iso(h)
+                if appliedISO != iso { iso = appliedISO }
+            }
+            isoAdjustmentNotice = requestedISO == iso ? nil : "ISO \(requestedISO) is unavailable for this recording. Using \(iso) (As Shot)."
+            isoPresetIndex = iso == nativeISO ? 0 : (isoPresets.firstIndex(of: iso).map { $0 + 1 } ?? -1)
+            schedulePreviewRefresh()
+        }
     }
     @Published var colorTemp: UInt32 = 5600 {
         didSet { if let h = handle { braw_clip_set_color_temp(h, colorTemp) }; schedulePreviewRefresh() }
@@ -139,12 +149,9 @@ final class ClipModel: Identifiable, ObservableObject {
     @Published var isoPresetIndex: Int = -1
     @Published var colorPresetIndex: Int = 0
 
-    static let isoPresets: [UInt32] = [
-        100, 125, 160, 200, 250, 320, 400, 500, 640,
-        800, 1000, 1250, 1600, 2000, 2500, 3200, 4000,
-        5000, 6400, 8000, 10000, 12800, 16000, 20000, 25600
-    ]
-    static let isoPresetLabels: [String] = isoPresets.map { "\($0)" } + ["Custom"]
+    var isoPresets: [UInt32] = []
+    var isoReadOnly = true
+    @Published var isoAdjustmentNotice: String?
 
     struct ColorPreset: Identifiable {
         let id: Int
@@ -173,6 +180,8 @@ final class ClipModel: Identifiable, ObservableObject {
             _gamma = String(cString: braw_clip_get_gamma(h))
             _gamut = String(cString: braw_clip_get_gamut(h))
             colorScienceGen = braw_clip_get_color_science_gen(h)
+            isoPresets = (0..<Int(braw_clip_get_iso_count(h))).map { braw_clip_get_iso_at(h, Int32($0)) }
+            isoReadOnly = braw_clip_iso_is_read_only(h) != 0
             iso = braw_clip_get_iso(h)
             colorTemp = braw_clip_get_color_temp(h)
             tint = braw_clip_get_tint(h)
@@ -186,7 +195,7 @@ final class ClipModel: Identifiable, ObservableObject {
             // Match current ISO to dropdown index
             if iso == nativeISO {
                 isoPresetIndex = 0
-            } else if let presetIdx = Self.isoPresets.firstIndex(of: iso) {
+            } else if let presetIdx = isoPresets.firstIndex(of: iso) {
                 isoPresetIndex = presetIdx + 1
             } else {
                 isoPresetIndex = -1
@@ -263,7 +272,7 @@ final class ClipModel: Identifiable, ObservableObject {
 
     func synchronizePresetLabels() {
         if iso == nativeISO { isoPresetIndex = 0 }
-        else if let index = Self.isoPresets.firstIndex(of: iso) { isoPresetIndex = index + 1 }
+        else if let index = isoPresets.firstIndex(of: iso) { isoPresetIndex = index + 1 }
         else { isoPresetIndex = -1 }
 
         if colorTemp == nativeColorTemp && tint == nativeTint { colorPresetIndex = 0 }
@@ -275,11 +284,10 @@ final class ClipModel: Identifiable, ObservableObject {
     func applyISOPreset(_ index: Int) {
         if index == 0 {
             iso = nativeISO
-        } else if index >= 1 && index <= Self.isoPresets.count {
-            iso = Self.isoPresets[index - 1]
+        } else if index >= 1 && index <= isoPresets.count {
+            iso = isoPresets[index - 1]
         }
-        isoPresetIndex = index
-        schedulePreviewRefresh()
+        synchronizePresetLabels()
     }
 
     func applyColorPreset(_ index: Int) {
@@ -506,6 +514,10 @@ final class ProjectModel: ObservableObject {
             if let target = getClip(at: i), let dstHandle = braw_project_get_clip(h, Int32(i)) {
                 braw_clip_copy_adjustments(srcHandle, dstHandle)
                 target.refreshAdjustmentsFromEngine()
+                let sourceISO = braw_clip_get_iso(srcHandle)
+                if target.iso != sourceISO {
+                    target.isoAdjustmentNotice = "ISO \(sourceISO) is unavailable for this recording. Using \(target.iso) (As Shot)."
+                }
             }
         }
     }

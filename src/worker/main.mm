@@ -24,12 +24,15 @@ int main() {
                 auto audio=decoder.GetAudioInfo();
                 NSMutableDictionary* metadata=[NSMutableDictionary dictionary];
                 for(auto& [key,value]:decoder.GetFreeFormMetadata())metadata[str(key)]=str(value);
+                NSMutableArray* isoList=[NSMutableArray array];
+                for(auto iso:decoder.GetISOList())[isoList addObject:@(iso)];
                 NSDictionary* info=@{
                     @"width":@(decoder.GetWidth()),@"height":@(decoder.GetHeight()),
                     @"fps":@(decoder.GetFrameRate()),@"frames":@(decoder.GetFrameCount()),
                     @"camera":str(decoder.GetCameraType()),@"gamma":str(decoder.GetClipGamma()),
                     @"gamut":str(decoder.GetClipGamut()),@"generation":@(decoder.GetColorScienceGen()),
                     @"iso":@(decoder.GetNativeISO()),@"temperature":@(decoder.GetNativeColorTemp()),
+                    @"isoList":isoList,@"isoReadOnly":@(decoder.ISOIsReadOnly()),
                     @"tint":@(decoder.GetNativeTint()),@"exposure":@(decoder.GetNativeExposure()),
                     @"sdk":str(decoder.Version()),@"metadata":metadata,
                     @"audioRate":@(audio.rate),@"audioChannels":@(audio.channels),

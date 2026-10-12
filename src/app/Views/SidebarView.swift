@@ -26,7 +26,8 @@ struct SidebarView: View {
                 }.help("Import BRAW files")
                 .disabled((project.isExporting || project.isImporting))
             }
-            .padding(.horizontal, 12).padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .frame(height: PanelLayout.headerHeight)
             
             Divider()
             

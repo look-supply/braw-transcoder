@@ -8,6 +8,8 @@ struct BrawDecoder::Impl {
     std::string path,error,version,camera,gamma,gamut;
     std::map<std::string,std::string> metadata;
     uint32_t width=0,height=0,iso=0,temperature=0;
+    std::vector<uint32_t> isoList;
+    bool isoReadOnly=true;
     uint64_t frames=0;
     float fps=0,exposure=0;
     int16_t tint=0;
@@ -47,6 +49,9 @@ struct BrawDecoder::Impl {
         width=[info[@"width"] unsignedIntValue];height=[info[@"height"] unsignedIntValue];
         frames=[info[@"frames"] unsignedLongLongValue];fps=[info[@"fps"] floatValue];
         iso=[info[@"iso"] unsignedIntValue];temperature=[info[@"temperature"] unsignedIntValue];
+        isoList.clear();for(NSNumber* value in info[@"isoList"])if(value.unsignedIntValue)isoList.push_back(value.unsignedIntValue);
+        isoReadOnly=info[@"isoReadOnly"]?[info[@"isoReadOnly"] boolValue]:true;
+        if(isoList.empty()){isoList={iso};isoReadOnly=true;}
         tint=[info[@"tint"] shortValue];exposure=[info[@"exposure"] floatValue];
         generation=[info[@"generation"] unsignedShortValue];
         version=[info[@"sdk"] UTF8String]?:"";camera=[info[@"camera"] UTF8String]?:"";
@@ -80,9 +85,10 @@ GET(int16_t,GetNativeTint,tint) GET(float,GetNativeExposure,exposure)
 GET(std::string,GetClipGamma,gamma) GET(std::string,GetClipGamut,gamut)
 GET(uint16_t,GetColorScienceGen,generation) GET(std::string,LastError,error)
 GET(std::string,SDKVersion,version) GET(bool,UsingMetal,metal)
+GET(bool,ISOIsReadOnly,isoReadOnly)
 #undef GET
 std::map<std::string,std::string> BrawDecoder::GetFreeFormMetadata() const{return m_impl->metadata;}
-std::vector<uint32_t> BrawDecoder::GetISOList(){return {100,125,160,200,250,320,400,500,640,800,1000,1250,1600,2000,2500,3200,4000,5000,6400,8000,10000,12800,16000,20000,25600};}
+std::vector<uint32_t> BrawDecoder::GetISOList(){return m_impl->isoList;}
 void BrawDecoder::SetOutputFormat(int format){m_impl->format=format;}
 void BrawDecoder::SetCancellation(const std::atomic<bool>* cancel){m_impl->cancel=cancel;}
 void BrawDecoder::SetCustomLUT(const std::string&){m_impl->error="Custom LUT files are not supported";}
@@ -91,6 +97,9 @@ void BrawDecoder::FlushJobs(){} // IPC responses arrive only after a completed r
 void BrawDecoder::RequestFrame(uint64_t index,const ClipAdjustments& a,FrameCallback callback,float scale) {
     auto& p=*m_impl;if(index>=p.frames||!p.width){p.error="Frame index is out of range";return;}
     if(p.cancel&&p.cancel->load()){p.error="Cancelled";return;}
+    if(a.iso&&((p.isoReadOnly&&a.iso!=p.iso)||std::find(p.isoList.begin(),p.isoList.end(),a.iso)==p.isoList.end())) {
+        p.error="ISO "+std::to_string(a.iso)+" is not supported by this clip's recorded analog gain. Use a listed ISO or adjust Exposure.";return;
+    }
     Request request;request.command=Frame;request.index=index;request.iso=a.iso;
     request.temperature=a.colorTemp;request.tint=a.tint;request.exposure=a.exposure;
     request.scale=scale;request.highlight=a.highlightRecovery;request.lut=a.previewLUT;

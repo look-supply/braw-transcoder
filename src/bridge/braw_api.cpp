@@ -27,6 +27,8 @@ struct BrawClipHandle {
     uint16_t colorScienceGen = 0;
     std::string cameraType;
     uint32_t nativeISO = 0;
+    std::vector<uint32_t> isoList;
+    bool isoReadOnly=true;
     uint32_t nativeColorTemp = 5600;
     int16_t  nativeTint = 0;
     float    nativeExposure = 0.0f;
@@ -96,6 +98,8 @@ BrawClipHandle* braw_clip_open(const char* path) {
         // Capture native camera settings
         h->decoder->CaptureNativeSettings();
         h->nativeISO        = h->decoder->GetNativeISO();
+        h->isoList          = h->decoder->GetISOList();
+        h->isoReadOnly      = h->decoder->ISOIsReadOnly();
         h->nativeColorTemp  = h->decoder->GetNativeColorTemp();
         h->nativeTint       = h->decoder->GetNativeTint();
         h->nativeExposure   = h->decoder->GetNativeExposure();
@@ -159,6 +163,9 @@ uint32_t  braw_clip_get_height(BrawClipHandle* h)    { return h ? h->nativeHeigh
 float     braw_clip_get_frame_rate(BrawClipHandle* h){ return h ? h->frameRate : 0; }
 uint64_t  braw_clip_get_frame_count(BrawClipHandle* h){ return h ? h->frameCount : 0; }
 uint32_t braw_clip_get_native_iso(BrawClipHandle* h)         { return h ? h->nativeISO : 0; }
+int braw_clip_get_iso_count(BrawClipHandle* h){return h?int(h->isoList.size()):0;}
+uint32_t braw_clip_get_iso_at(BrawClipHandle* h,int index){return h&&index>=0&&index<int(h->isoList.size())?h->isoList[index]:0;}
+int braw_clip_iso_is_read_only(BrawClipHandle* h){return !h||h->isoReadOnly;}
 uint32_t braw_clip_get_native_color_temp(BrawClipHandle* h)  { return h ? h->nativeColorTemp : 0; }
 int16_t  braw_clip_get_native_tint(BrawClipHandle* h)        { return h ? h->nativeTint : 0; }
 float    braw_clip_get_native_exposure(BrawClipHandle* h)     { return h ? h->nativeExposure : 0.0f; }
@@ -176,7 +183,11 @@ const char* braw_clip_get_metadata_value(BrawClipHandle* h, int i) {
 // ── Adjustments ───────────────────────────────────
 
 uint32_t braw_clip_get_iso(BrawClipHandle* h)               { if(!h)return 0; std::lock_guard lock(h->settingsMutex); return h->adjustments.iso; }
-void braw_clip_set_iso(BrawClipHandle* h, uint32_t v)       { if (h) {std::lock_guard lock(h->settingsMutex); h->adjustments.iso = v;} }
+void braw_clip_set_iso(BrawClipHandle* h, uint32_t v) {
+    if(h){std::lock_guard lock(h->settingsMutex);
+        h->adjustments.iso=!h->isoReadOnly&&std::find(h->isoList.begin(),h->isoList.end(),v)!=h->isoList.end()?v:h->nativeISO;
+    }
+}
 uint32_t braw_clip_get_color_temp(BrawClipHandle* h)         { if(!h)return 0; std::lock_guard lock(h->settingsMutex); return h->adjustments.colorTemp; }
 void braw_clip_set_color_temp(BrawClipHandle* h, uint32_t v) { if (h) {std::lock_guard lock(h->settingsMutex); h->adjustments.colorTemp = v;} }
 int16_t  braw_clip_get_tint(BrawClipHandle* h)               { if(!h)return 0; std::lock_guard lock(h->settingsMutex); return h->adjustments.tint; }
@@ -187,7 +198,11 @@ bool braw_clip_get_highlight_recovery(BrawClipHandle* h)     { if(!h)return fals
 void braw_clip_set_highlight_recovery(BrawClipHandle* h, bool v) { if (h) {std::lock_guard lock(h->settingsMutex); h->adjustments.highlightRecovery = v;} }
 bool braw_clip_get_preview_lut(BrawClipHandle* h)            { if(!h)return false; std::lock_guard lock(h->settingsMutex); return h->adjustments.previewLUT; }
 void braw_clip_set_preview_lut(BrawClipHandle* h, bool v)   { if (h) {std::lock_guard lock(h->settingsMutex); h->adjustments.previewLUT = v;} }
-void braw_clip_copy_adjustments(BrawClipHandle* src, BrawClipHandle* dst) { if (src && dst && src!=dst) {std::scoped_lock lock(src->settingsMutex,dst->settingsMutex); dst->adjustments = src->adjustments;} }
+void braw_clip_copy_adjustments(BrawClipHandle* src, BrawClipHandle* dst) {
+    if(src&&dst&&src!=dst){std::scoped_lock lock(src->settingsMutex,dst->settingsMutex);dst->adjustments=src->adjustments;
+        if(dst->isoReadOnly||std::find(dst->isoList.begin(),dst->isoList.end(),dst->adjustments.iso)==dst->isoList.end())dst->adjustments.iso=dst->nativeISO;
+    }
+}
 
 // ── Decode ────────────────────────────────────────
 
@@ -380,4 +395,9 @@ int braw_clip_write_gyroflow_sidecar(BrawClipHandle* h, const char* outputMovPat
 
     fprintf(stderr, "GYRO: gyroflow sidecar writing not yet migrated\n");
     return -1;
+}
+
+int braw_export_dimensions(int mode, int nativeWidth, int nativeHeight, int* width, int* height) {
+    if (!width || !height) return 0;
+    return CalculateExportDimensions(mode, nativeWidth, nativeHeight, *width, *height) ? 1 : 0;
 }

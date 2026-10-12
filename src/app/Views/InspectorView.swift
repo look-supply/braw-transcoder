@@ -9,7 +9,8 @@ struct InspectorView: View {
                 Image(systemName: "slider.horizontal.3").foregroundColor(.secondary)
                 Text("Inspector").font(.headline).foregroundColor(.secondary)
             }
-            .padding(.horizontal, 12).padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .frame(height: PanelLayout.headerHeight)
             .frame(maxWidth: .infinity, alignment: .leading)
             
             Divider()
@@ -38,17 +39,6 @@ struct InspectorContent: View {
     @ObservedObject var project: ProjectModel
     var isExporting: Bool { project.isExporting }
     
-    private var isoLabel: String {
-        switch clip.isoPresetIndex {
-        case 0:
-            return "\(clip.nativeISO) (Native)"
-        case 1...ClipModel.isoPresets.count:
-            return "\(ClipModel.isoPresets[clip.isoPresetIndex - 1])"
-        default:
-            return "Custom"
-        }
-    }
-    
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -61,28 +51,20 @@ struct InspectorContent: View {
                                 get: { clip.isoPresetIndex },
                                 set: { clip.applyISOPreset($0) }
                             )) {
-                                Text("\(clip.nativeISO) (Native)").tag(0)
-                                ForEach(0..<ClipModel.isoPresets.count, id: \.self) { i in
-                                    Text("\(ClipModel.isoPresets[i])").tag(i + 1)
+                                Text("\(clip.nativeISO) (As Shot)").tag(0)
+                                ForEach(0..<clip.isoPresets.count, id: \.self) { i in
+                                    Text("\(clip.isoPresets[i])").tag(i + 1)
                                 }
-                                Text("Custom").tag(ClipModel.isoPresets.count + 1)
                             } label: { EmptyView() }
                             .pickerStyle(.menu)
                             .frame(maxWidth: .infinity)
-                            .disabled(isExporting)
+                            .disabled(isExporting || clip.isoReadOnly)
+                            .help("ISO cannot switch the sensor gain used during recording. Use Exposure for brightness changes outside this range.")
                             
-                            if clip.isoPresetIndex == ClipModel.isoPresets.count + 1 || clip.isoPresetIndex < 0 {
-                                HStack {
-                                    Text(String(format: "%.0f", Double(clip.iso)))
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .foregroundColor(.secondary)
-                                        .frame(width: 55, alignment: .trailing)
-                                    Slider(value: Binding<Double>(
-                                        get: { Double(clip.iso) },
-                                        set: { clip.iso = UInt32($0) }
-                                    ), in: 100...25600).controlSize(.small)
-                                    .disabled(isExporting)
-                                }
+                            Text(clip.isoReadOnly ? "ISO is fixed for this recording." : "Available ISO values follow the recorded sensor gain.")
+                                .font(.system(size: 10)).foregroundColor(.secondary)
+                            if let notice = clip.isoAdjustmentNotice {
+                                Text(notice).font(.caption).foregroundColor(.orange)
                             }
                         }
                         .frame(maxWidth: .infinity)

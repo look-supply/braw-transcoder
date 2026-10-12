@@ -20,7 +20,8 @@ struct PreviewView: View {
                         .font(.system(size: 12)).foregroundColor(.secondary)
                 }
             }
-            .padding(.horizontal, 12).padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .frame(height: PanelLayout.headerHeight)
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
             
             Divider()

@@ -21,6 +21,8 @@ struct SDKDecoder::Impl {
     bool prepared=false, prepareOK=false, completed=false, frameOK=false;
     bool nativeCaptured=false;
     uint32_t width=0,height=0,nativeISO=800,nativeColorTemp=5600;
+    std::vector<uint32_t> isoList;
+    bool isoReadOnly=true;
     uint64_t frameCount=0;
     float frameRate=0,nativeExposure=0;
     int16_t nativeTint=0;
@@ -110,12 +112,26 @@ public:
             VariantClear(&v); VariantInit(&v);
             if(SUCCEEDED(attrs->GetFrameAttribute(blackmagicRawFrameProcessingAttributeExposure,&v))) impl->nativeExposure=v.fltVal;
             VariantClear(&v); impl->nativeCaptured=true;
+            uint32_t count=0;
+            if(SUCCEEDED(attrs->GetISOList(nullptr,&count,&impl->isoReadOnly))&&count&&count<=4096) {
+                impl->isoList.resize(count);
+                if(SUCCEEDED(attrs->GetISOList(impl->isoList.data(),&count,&impl->isoReadOnly)))impl->isoList.resize(count);
+                else impl->isoList.clear();
+            }
+            if(impl->isoList.empty()) {impl->isoList={impl->nativeISO};impl->isoReadOnly=true;}
         }
         // ISO=0 and temperature=0 mean native. Zero tint is a valid adjustment.
         auto a=impl->adjustments;
         Variant v; VariantInit(&v); v.vt=blackmagicRawVariantTypeU32;
         v.uintVal=a.iso?a.iso:impl->nativeISO;
-        attrs->SetFrameAttribute(blackmagicRawFrameProcessingAttributeISO,&v);
+        HRESULT isoResult=S_OK;
+        if(std::find(impl->isoList.begin(),impl->isoList.end(),v.uintVal)==impl->isoList.end())isoResult=E_INVALIDARG;
+        else if(!impl->isoReadOnly)isoResult=attrs->SetFrameAttribute(blackmagicRawFrameProcessingAttributeISO,&v);
+        else if(v.uintVal!=impl->nativeISO)isoResult=E_INVALIDARG;
+        if(FAILED(isoResult)) {
+            fprintf(stderr,"Could not apply ISO %u for recorded analog gain (as-shot ISO %u): 0x%x\n",v.uintVal,impl->nativeISO,unsigned(isoResult));
+            attrs->Release();clipAttrs->Release();if(job)job->Release();impl->Finish(false);return;
+        }
         v.uintVal=a.colorTemp?a.colorTemp:impl->nativeColorTemp;
         attrs->SetFrameAttribute(blackmagicRawFrameProcessingAttributeWhiteBalanceKelvin,&v);
         v.vt=blackmagicRawVariantTypeS16; v.iVal=a.tint;
@@ -287,7 +303,7 @@ void SDKDecoder::Close() {
     if(p.callback){p.callback->Release();p.callback=nullptr;}
     if(p.factory){p.factory->Release();p.factory=nullptr;}
     p.device=nil;p.queue=nil;p.nativeCaptured=false;p.width=0;p.height=0;
-    p.frameMetadata.clear();
+    p.frameMetadata.clear();p.isoList.clear();p.isoReadOnly=true;
 }
 bool SDKDecoder::Decode(uint64_t index,const ClipAdjustments& a,float scale,Frame& out) {
     auto& p=*m_impl;
@@ -308,6 +324,7 @@ bool SDKDecoder::Decode(uint64_t index,const ClipAdjustments& a,float scale,Fram
 GETTER(uint32_t,GetWidth,width) GETTER(uint32_t,GetHeight,height)
 GETTER(float,GetFrameRate,frameRate) GETTER(uint64_t,GetFrameCount,frameCount)
 GETTER(uint32_t,GetNativeISO,nativeISO) GETTER(uint32_t,GetNativeColorTemp,nativeColorTemp)
+GETTER(std::vector<uint32_t>,GetISOList,isoList) GETTER(bool,ISOIsReadOnly,isoReadOnly)
 GETTER(int16_t,GetNativeTint,nativeTint) GETTER(float,GetNativeExposure,nativeExposure)
 GETTER(std::string,GetCameraType,cameraType) GETTER(std::string,Version,version)
 #undef GETTER

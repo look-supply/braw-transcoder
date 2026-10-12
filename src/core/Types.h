@@ -121,4 +121,25 @@ inline int CalculateOutputWidth(int targetHeight, int nativeW, int nativeH) {
     return (w + 1) & ~1;
 }
 
-
+// Export mode IDs retain the old 2160/1080 aliases for existing callers.
+// Heights are ceilings, not requested sizes: exports must never upscale.
+inline bool CalculateExportDimensions(int mode, int nativeW, int nativeH, int& width, int& height) {
+    int ceiling = 0;
+    switch (mode) {
+        case 0: break;
+        case 1: case 2: ceiling = 2160; break;
+        case 3: case 4: ceiling = 1080; break;
+        case 5: ceiling = 4320; break;
+        case 6: ceiling = 3240; break;
+        default: return false;
+    }
+    if (nativeW <= 0 || nativeH <= 0) return false;
+    width = nativeW;
+    height = nativeH;
+    if (ceiling && nativeH > ceiling) {
+        height = ceiling;
+        const double proportionalWidth = double(nativeW) * height / nativeH;
+        width = std::min(nativeW & ~1, std::max(2, int(std::lround(proportionalWidth / 2)) * 2));
+    }
+    return width > 0 && height > 0;
+}

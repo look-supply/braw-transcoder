@@ -26,6 +26,7 @@ public:
     std::string GetCameraType() const;
 
     std::vector<uint32_t> GetISOList();
+    bool ISOIsReadOnly() const;
 
     // Decode a single frame synchronously. The callback receives CPU-side
     // BGRA8 pixel data. Blocks until the frame is decoded.

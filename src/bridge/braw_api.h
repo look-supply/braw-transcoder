@@ -30,6 +30,9 @@ uint64_t        braw_clip_get_frame_count(BrawClipHandle* h);
 
 // Native camera settings (captured on first decode)
 uint32_t braw_clip_get_native_iso(BrawClipHandle* h);
+int      braw_clip_get_iso_count(BrawClipHandle* h);
+uint32_t braw_clip_get_iso_at(BrawClipHandle* h, int index);
+int      braw_clip_iso_is_read_only(BrawClipHandle* h);
 uint32_t braw_clip_get_native_color_temp(BrawClipHandle* h);
 int16_t  braw_clip_get_native_tint(BrawClipHandle* h);
 float    braw_clip_get_native_exposure(BrawClipHandle* h);
@@ -93,6 +96,11 @@ void               braw_project_clear(BrawProjectHandle* h);
 // ── Export API ──────────────────────────────────
 typedef void (*ExportProgressFn)(int clipIndex, int totalClips,
                                   int frameIndex, int totalFrames, void* ctx);
+
+// Modes: 0=original, 1/2=2160-high, 3/4=1080-high, 5=4320-high, 6=3240-high.
+// Preserves aspect ratio (rounded to even pixels) and never upscales.
+int braw_export_dimensions(int resolutionMode, int nativeWidth, int nativeHeight,
+                           int* outputWidth, int* outputHeight);
 
 // Export one or more clips through an isolated decoder and streaming encoder.
 // Blocks until completion, failure, or cancellation. Call on a background thread.

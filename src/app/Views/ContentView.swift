@@ -1,5 +1,9 @@
 import SwiftUI
 
+enum PanelLayout {
+    static let headerHeight: CGFloat = 40
+}
+
 struct ContentView: View {
     @ObservedObject var project: ProjectModel
     

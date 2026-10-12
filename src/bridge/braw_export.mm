@@ -4,6 +4,7 @@
 #include "core/ChildProcess.h"
 #include "core/ExportColorMetadata.h"
 #include "core/ExportEncoderError.h"
+#include "core/ExportAudio.h"
 #include "core/ExportRecordingMetadata.h"
 #include "core/QuickTimeMetadata.h"
 #import <Foundation/Foundation.h>
@@ -72,8 +73,10 @@ static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution
         }
     }
     int nativeWidth=decoder.GetWidth(),nativeHeight=decoder.GetHeight();
-    int targetHeight=resolution==0?nativeHeight:(resolution<=2?2160:1080);
-    int targetWidth=resolution==0?nativeWidth:CalculateOutputWidth(targetHeight,nativeWidth,nativeHeight);
+    int targetWidth=0,targetHeight=0;
+    if(!CalculateExportDimensions(resolution,nativeWidth,nativeHeight,targetWidth,targetHeight)) {
+        setError("Invalid export resolution or source dimensions.");return false;
+    }
     if(targetWidth%2||targetHeight%2){setError("Output dimensions must be even.");return false;}
     // Always decode native-resolution RGB16 frames. Screen previews and SDK
     // reduced-resolution modes must not determine export image quality.
@@ -89,10 +92,10 @@ static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution
         "-f","rawvideo","-pixel_format","rgb48le","-video_size",std::to_string(width)+"x"+std::to_string(height),
         "-framerate",std::to_string(decoder.GetFrameRate()),"-threads","1","-thread_queue_size","1","-i","pipe:0"};
     if(hasAudio) {
-        args.insert(args.end(),{"-f","s"+std::to_string(audio.bits)+"le","-ar",std::to_string(audio.rate),
-            "-ac",std::to_string(audio.channels),"-i",audioFile.string(),"-map","0:v:0","-map","1:a:0","-c:a","pcm_s24le"});
+        const auto audioArgs=ExportAudioArguments(audio.rate,audio.channels,audio.bits,audioFile.string());
+        args.insert(args.end(),audioArgs.begin(),audioArgs.end());
     } else args.insert(args.end(),{"-an"});
-    if(resolution!=0)args.insert(args.end(),{"-vf","scale="+std::to_string(targetWidth)+":"+std::to_string(targetHeight)});
+    if(targetWidth!=nativeWidth||targetHeight!=nativeHeight)args.insert(args.end(),{"-vf","scale="+std::to_string(targetWidth)+":"+std::to_string(targetHeight)});
     if(codec==0)args.insert(args.end(),{"-c:v","h264_videotoolbox","-tag:v","avc1","-pix_fmt","yuv420p","-b:v",std::to_string(bitrate)});
     else if(codec==1)args.insert(args.end(),{"-c:v","hevc_videotoolbox","-tag:v","hvc1","-pix_fmt","p010le","-b:v",std::to_string(bitrate)});
     else args.insert(args.end(),{"-c:v","prores_ks","-profile:v",std::to_string(profile),"-pix_fmt",profile>=4?"yuva444p10le":"yuv422p10le","-threads","4"});
@@ -167,7 +170,7 @@ int braw_export_start(BrawProjectHandle* project,const int* indices,int count,
         g_prepared=false;
     }
     struct RunningGuard {~RunningGuard(){g_running=false;}} running;
-    if(!project||!indices||count<=0||codec<0||codec>2||profile<0||profile>5||resolution<0||resolution>4||rate<=0||rate>1000){setError("Invalid export settings.");return -1;}
+    if(!project||!indices||count<=0||codec<0||codec>2||profile<0||profile>5||resolution<0||resolution>6||rate<=0||rate>1000){setError("Invalid export settings.");return -1;}
     @autoreleasepool {
         std::vector<std::unique_ptr<ClipOwner>> clips;
         for(int i=0;i<count;i++) {
@@ -187,7 +190,7 @@ int braw_export_start(BrawProjectHandle* project,const int* indices,int count,
                 {
                     std::lock_guard lock(g_stateMutex);
                     if(!g_warning.empty())g_warning+='\n';
-                    g_warning+="Skipped "+source.filename().string()+" ("+std::to_string(width)+" × "+std::to_string(height)+"): native 17K export is not supported yet. Choose 4K or 1080p to export this clip.";
+                    g_warning+="Skipped "+source.filename().string()+" ("+std::to_string(width)+" × "+std::to_string(height)+"): native 17K export is not supported yet. Choose a smaller height preset to export this clip.";
                 }
                 if(progress)progress(i,count,1,1,context);
                 continue;

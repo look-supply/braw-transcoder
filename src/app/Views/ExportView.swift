@@ -17,20 +17,39 @@ struct ExportView: View {
     
     let codecs = ["H.264", "H.265", "ProRes"]
     let proResProfiles = ["422 Proxy", "422 LT", "422", "422 HQ", "4444", "4444 XQ"]
-    let resolutions = ["Passthrough", "4K DCI", "4K UHD", "2K DCI", "1080p HD"]
+    let resolutions: [(mode: Int, label: String)] = [
+        (0, "Original resolution"), (5, "4320 pixels high (8K)"),
+        (6, "3240 pixels high (6K)"), (1, "2160 pixels high (4K)"), (3, "1080 pixels high (2K)")
+    ]
     let dataRates = ["30 Mbps", "50 Mbps", "100 Mbps", "150 Mbps", "200 Mbps", "250 Mbps", "300 Mbps", "400 Mbps", "500 Mbps", "600 Mbps"]
     let dataRateValues = [30, 50, 100, 150, 200, 250, 300, 400, 500, 600]
     
+    var availableResolutionModes: [Int] {
+        guard let clip = project.selectedClip else { return [0] }
+        return resolutions.compactMap { option in
+            if option.mode == 0 { return 0 }
+            var width: Int32 = 0, height: Int32 = 0
+            let downsamples = braw_export_dimensions(Int32(option.mode), Int32(clip.nativeWidth),
+                                                     Int32(clip.nativeHeight), &width, &height) != 0
+                && height < Int32(clip.nativeHeight)
+            return downsamples ? option.mode : nil
+        }
+    }
+
+    var resolutionSelection: Binding<Int> {
+        Binding(
+            get: { availableResolutionModes.contains(selectedResolution) ? selectedResolution : 0 },
+            set: { selectedResolution = availableResolutionModes.contains($0) ? $0 : 0 }
+        )
+    }
+
     var estimatedOutput: String {
         guard let clip = project.selectedClip, clip.nativeHeight > 0 else { return "—" }
-        if selectedResolution == 0 {
-            return "\(clip.nativeWidth) × \(clip.nativeHeight) (passthrough)"
-        }
-        let heights = [0, 2160, 2160, 1080, 1080]
-        let targetH = heights[selectedResolution]
-        let w = Int(round(Float(targetH) * Float(clip.nativeWidth) / Float(clip.nativeHeight)))
-        let evenW = (w + 1) & ~1
-        return "\(evenW) × \(targetH)"
+        var width: Int32 = 0, height: Int32 = 0
+        guard braw_export_dimensions(Int32(selectedResolution), Int32(clip.nativeWidth),
+                                     Int32(clip.nativeHeight), &width, &height) != 0 else { return "—" }
+        let original = width == Int32(clip.nativeWidth) && height == Int32(clip.nativeHeight)
+        return "\(width) × \(height)" + (original ? " (original)" : "")
     }
     
     var colorInfo: String {
@@ -78,9 +97,15 @@ struct ExportView: View {
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Resolution").font(.system(size: 10)).foregroundColor(.secondary)
-                    Picker("", selection: $selectedResolution) {
-                        ForEach(0..<resolutions.count, id: \.self) { i in Text(resolutions[i]).tag(i) }
-                    }.pickerStyle(.menu).frame(width: 140)
+                    Picker("", selection: resolutionSelection) {
+                        ForEach(resolutions.filter { availableResolutionModes.contains($0.mode) }, id: \.mode) { option in
+                            Text(option.label).tag(option.mode)
+                        }
+                    }.pickerStyle(.menu).frame(width: 180)
+                    .help("Preserves aspect ratio. Only presets that downsample the previewed clip are available. In mixed batches, smaller clips keep their original resolution.")
+                    .onChange(of: availableResolutionModes, initial: true) { _, modes in
+                        if !modes.contains(selectedResolution) { selectedResolution = 0 }
+                    }
                     .disabled(exportMgr.isExporting)
                 }
                 
@@ -176,7 +201,7 @@ struct ExportView: View {
         var settings = ExportUISettings()
         settings.codec = selectedCodec
         settings.proResProfile = selectedProResProfile
-        settings.resolutionMode = selectedResolution
+        settings.resolutionMode = availableResolutionModes.contains(selectedResolution) ? selectedResolution : 0
         settings.dataRateMbps = dataRateValues[selectedDataRate]
         settings.outputDir = useSourceDirectory ? "" : outputDir.trimmingCharacters(in: .whitespacesAndNewlines)
         settings.selectedIndices = selectedOnly ? project.selectedIndices.sorted() : []
