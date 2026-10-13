@@ -6,9 +6,10 @@ import MetalKit
 /// an NSImage conversion for each frame. The SDK worker also decodes with Metal.
 struct MetalPlaybackView: NSViewRepresentable {
     let frame: DecodedPixels
+    var zoom: CGFloat = 1
 
     func makeNSView(context: Context) -> PlaybackSurface { PlaybackSurface() }
-    func updateNSView(_ view: PlaybackSurface, context: Context) { view.display(frame) }
+    func updateNSView(_ view: PlaybackSurface, context: Context) { view.display(frame, zoom: zoom) }
 
     @MainActor final class PlaybackSurface: NSView {
         private let metalView: MTKView
@@ -20,6 +21,8 @@ struct MetalPlaybackView: NSViewRepresentable {
             metalView = MTKView(frame: .zero, device: device)
             renderer = device.flatMap { try? Renderer(device: $0) }
             super.init(frame: .zero)
+            wantsLayer = true
+            layer?.masksToBounds = true
             metalView.isPaused = true
             metalView.enableSetNeedsDisplay = true
             metalView.colorPixelFormat = .bgra8Unorm
@@ -27,18 +30,21 @@ struct MetalPlaybackView: NSViewRepresentable {
             metalView.clearColor = MTLClearColorMake(0, 0, 0, 1)
             metalView.delegate = renderer
             fallback.imageScaling = .scaleProportionallyUpOrDown
+            fallback.wantsLayer = true
             let content: NSView = renderer == nil ? fallback : metalView
             content.autoresizingMask = [.width, .height]
             addSubview(content)
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-        func display(_ frame: DecodedPixels) {
+        func display(_ frame: DecodedPixels, zoom: CGFloat) {
             if let renderer {
                 renderer.frame = frame
+                renderer.zoom = Float(zoom)
                 metalView.needsDisplay = true
             } else {
                 fallback.image = makeNSImageBGRA(frame: frame)
+                fallback.layer?.setAffineTransform(CGAffineTransform(scaleX: zoom, y: zoom))
             }
         }
     }
@@ -49,6 +55,7 @@ struct MetalPlaybackView: NSViewRepresentable {
         private let pipeline: MTLRenderPipelineState
         private let slots = (0..<3).map { _ in TextureSlot() }
         var frame: DecodedPixels?
+        var zoom: Float = 1
         private(set) var submittedFrames = 0
 
         init(device: MTLDevice) throws {
@@ -66,9 +73,11 @@ struct MetalPlaybackView: NSViewRepresentable {
                     v.uv = float2((positions[i].x + 1) * 0.5, (1 - positions[i].y) * 0.5);
                     return v;
                 }
-                fragment float4 playbackFragment(Vertex v [[stage_in]], texture2d<float> image [[texture(0)]]) {
+                fragment float4 playbackFragment(Vertex v [[stage_in]], texture2d<float> image [[texture(0)]], constant float4& parameters [[buffer(0)]]) {
                     constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
-                    return float4(image.sample(s, v.uv).rgb, 1);
+                    float2 uv = (v.uv - 0.5) * parameters.yz / parameters.x + 0.5;
+                    if (any(uv < 0.0) || any(uv > 1.0)) return float4(0, 0, 0, 1);
+                    return float4(image.sample(s, uv).rgb, 1);
                 }
                 """, options: nil)
             let descriptor = MTLRenderPipelineDescriptor()
@@ -122,6 +131,12 @@ struct MetalPlaybackView: NSViewRepresentable {
             guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return false }
             encoder.setRenderPipelineState(pipeline)
             encoder.setFragmentTexture(texture, index: 0)
+            let target = pass.colorAttachments[0].texture!
+            let viewportAspect = Float(target.width) / Float(target.height)
+            let imageAspect = Float(frame.width) / Float(frame.height)
+            var parameters = SIMD4<Float>(zoom,
+                max(1, viewportAspect / imageAspect), max(1, imageAspect / viewportAspect), 0)
+            encoder.setFragmentBytes(&parameters, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             encoder.endEncoding()
             return true

@@ -31,6 +31,19 @@ import SwiftUI
             var output = Data(bytes: readback.contents(), count: 8)
             output.append(Data(bytes: readback.contents().advanced(by: 256), count: 8))
             precondition(output == input, "Metal playback flipped the image or altered RGB channels")
+            renderer.zoom = 0.25
+            let zoomed = queue.makeCommandBuffer()!
+            precondition(renderer.encode(DecodedPixels(data: input, width: 2, height: 2), pass: pass, command: zoomed))
+            let copy = zoomed.makeBlitCommandEncoder()!
+            copy.copy(from: texture, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                      sourceSize: MTLSize(width: 2, height: 2, depth: 1), to: readback,
+                      destinationOffset: 0, destinationBytesPerRow: 256, destinationBytesPerImage: 512)
+            copy.endEncoding()
+            zoomed.commit(); zoomed.waitUntilCompleted()
+            var zoomedPixels = Data(bytes: readback.contents(), count: 8)
+            zoomedPixels.append(Data(bytes: readback.contents().advanced(by: 256), count: 8))
+            precondition(zoomedPixels == Data([0,0,0,255, 0,0,0,255, 0,0,0,255, 0,0,0,255]),
+                         "Zoom-out sampled beyond the image instead of showing black borders")
         }
     }
 
@@ -85,6 +98,16 @@ import SwiftUI
         try await wait("import") { !project.isImporting }
         let clip = project.selectedClip!
         try await wait("preview") { !clip.isLoadingPreview && !clip.isLoadingThumbnail }
+        clip.zoomIn()
+        precondition(clip.previewZoom > 1)
+        clip.zoomOut()
+        precondition(abs(clip.previewZoom - 1) < 0.001)
+        clip.zoomPreview(by: 100)
+        precondition(clip.previewZoom == 8)
+        clip.zoomPreview(by: 0.0001)
+        precondition(clip.previewZoom == 0.25)
+        clip.resetZoom()
+        precondition(clip.previewZoom == 1)
         if clip.frameCount < 2 {
             clip.startPlayback()
             try await wait("single-frame playback") { !clip.isPlaying }
@@ -107,6 +130,15 @@ import SwiftUI
         precondition(clip.playbackUsesMetal == (ProcessInfo.processInfo.environment["BRAW_DECODE_PIPELINE"] != "cpu"), "Requested decoder pipeline was not used")
         let audio = braw_clip_get_audio_info(braw_project_get_clip(project.projectHandle, 0))
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap { descendants($0) } }
+        let wheel = descendants(host).compactMap { $0 as? PreviewWheelZoom.Anchor }.first!
+        precondition(wheel.bounds.width > 300 && wheel.bounds.height > 100, "Wheel target did not fill the preview")
+        let center = wheel.convert(NSPoint(x: wheel.bounds.midX, y: wheel.bounds.midY), to: nil)
+        precondition(wheel.handleScroll(delta: 3, precise: false, location: center, eventWindow: previewWindow))
+        precondition(clip.previewZoom > 1 && clip.isPlaying, "Wheel zoom paused playback")
+        let zoom = clip.previewZoom
+        precondition(!wheel.handleScroll(delta: 3, precise: false, location: NSPoint(x: -100, y: -100), eventWindow: previewWindow) &&
+                     clip.previewZoom == zoom, "Scrolling outside the preview changed zoom")
+        clip.resetZoom()
         let renderer = descendants(host).compactMap { $0 as? MTKView }.first?.delegate as? MetalPlaybackView.Renderer
         precondition(renderer != nil, "Actual preview did not create its Metal renderer")
         let submittedBefore = renderer!.submittedFrames
@@ -201,10 +233,21 @@ import SwiftUI
         precondition(anchor.handle(space()) == nil && !clip.isPlaying, "Space did not pause")
         precondition(anchor.handle(space(modifiers: .command)) != nil && !clip.isPlaying,
                      "Modified Space was intercepted")
+        func zoomKey(_ key: String, modifiers: NSEvent.ModifierFlags = []) -> NSEvent {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                            windowNumber: window.windowNumber, context: nil, characters: key,
+                            charactersIgnoringModifiers: key, isARepeat: false, keyCode: key == "z" ? 6 : 24)!
+        }
+        precondition(anchor.handle(zoomKey("+", modifiers: [.command, .shift])) == nil && clip.previewZoom > 1)
+        precondition(anchor.handle(zoomKey("-", modifiers: .command)) == nil && abs(clip.previewZoom - 1) < 0.001)
+        clip.zoomIn()
+        precondition(anchor.handle(zoomKey("z")) == nil && clip.previewZoom == 1, "Z did not reset zoom")
         let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 40))
         anchor.addSubview(editor)
         precondition(window.makeFirstResponder(editor))
         precondition(anchor.handle(space()) != nil && !clip.isPlaying, "Space interrupted text editing")
+        precondition(anchor.handle(zoomKey("z")) != nil && anchor.handle(zoomKey("+", modifiers: .command)) != nil &&
+                     clip.previewZoom == 1, "Zoom shortcuts interrupted text editing")
         anchor.removeMonitor()
         window.orderOut(nil)
         try await wait("pause after keyboard check") { !clip.isLoadingPreview }

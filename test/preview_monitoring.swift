@@ -107,7 +107,7 @@ struct MonitoringTests {
             precondition(control.trackingMode == .selectOne && control.segmentCount == 2)
             let toggle = descendants(view).compactMap { $0 as? NSButton }.first { $0.title == "False color" }!
             let toggleBounds = toggle.convert(toggle.bounds, to: view)
-            precondition(abs(toggleBounds.minX - bounds.maxX - 8) < 1, "False color button is not spaced 8 points from segments")
+            precondition(abs(toggleBounds.minX - bounds.maxX - 12) < 1, "False color button is not spaced 12 points from segments")
             toggle.performClick(nil)
             precondition(clip.falseColorEnabled && clip.previewMode == .log)
             control.selectedSegment = 0

@@ -61,13 +61,53 @@ struct PlaybackKeyboardShortcuts: NSViewRepresentable {
             }
         }
         func handle(_ event: NSEvent) -> NSEvent? {
-            guard let window, event.window === window, event.keyCode == 49,
-                  event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+            guard let window, event.window === window,
                   !(window.firstResponder is NSTextView),
-                  let project, !project.isExporting, !project.isImporting,
-                  let clip = project.selectedClip, clip.frameCount > 0 else { return event }
+                  let project, let clip = project.selectedClip else { return event }
+            let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+            let key = event.charactersIgnoringModifiers?.lowercased()
+            if modifiers.contains(.command), modifiers.intersection([.control, .option]).isEmpty {
+                if key == "+" || key == "=" { clip.zoomIn(); return nil }
+                if key == "-" { clip.zoomOut(); return nil }
+            }
+            if modifiers.isEmpty, key == "z" { clip.resetZoom(); return nil }
+            guard event.keyCode == 49, modifiers.isEmpty,
+                  !project.isExporting, !project.isImporting, clip.frameCount > 0 else { return event }
             if !event.isARepeat { clip.togglePlayback() }
             return nil
+        }
+        func removeMonitor() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
+    }
+}
+
+struct PreviewWheelZoom: NSViewRepresentable {
+    let clip: ClipModel
+    func makeNSView(context: Context) -> Anchor { Anchor() }
+    func updateNSView(_ view: Anchor, context: Context) { view.clip = clip }
+    static func dismantleNSView(_ view: Anchor, coordinator: ()) { view.removeMonitor() }
+    final class Anchor: NSView {
+        weak var clip: ClipModel?
+        private var monitor: Any?
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            removeMonitor()
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, self.handleScroll(delta: event.scrollingDeltaY, precise: event.hasPreciseScrollingDeltas,
+                    location: event.locationInWindow, eventWindow: event.window) else { return event }
+                return nil
+            }
+        }
+        func handleScroll(delta: CGFloat, precise: Bool, location: NSPoint, eventWindow: NSWindow?) -> Bool {
+            guard let window, eventWindow === window, bounds.contains(convert(location, from: nil)),
+                  let clip, delta != 0 else { return false }
+            let sensitivity: Double = precise ? 0.006 : 0.08
+            clip.zoomPreview(by: CGFloat(exp(max(-1, min(1, Double(delta) * sensitivity)))))
+            return true
         }
         func removeMonitor() {
             if let monitor { NSEvent.removeMonitor(monitor) }
@@ -85,18 +125,25 @@ struct PreviewContent: View {
         GeometryReader { geo in
             ZStack {
                 Color.black.opacity(0.92)
+                    .overlay {
+                        PreviewWheelZoom(clip: clip)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .padding(.bottom, 60)
+                    }
                 
                 let aspect = clip.renderAspectRatio
                 
                 if let frame = clip.playbackFrame {
-                    MetalPlaybackView(frame: frame)
-                        .aspectRatio(aspect, contentMode: .fit)
-                        .frame(maxWidth: geo.size.width - 24, maxHeight: geo.size.height - 60)
+                    MetalPlaybackView(frame: frame, zoom: clip.previewZoom)
+                        .frame(width: max(1, geo.size.width - 24), height: max(1, geo.size.height - 60))
                 } else if let preview = clip.preview {
                     Image(nsImage: preview)
                         .resizable()
                         .aspectRatio(aspect, contentMode: .fit)
-                        .frame(maxWidth: geo.size.width - 24, maxHeight: geo.size.height - 60)
+                        .frame(width: max(1, geo.size.width - 24), height: max(1, geo.size.height - 60))
+                        .scaleEffect(clip.previewZoom)
+                        .frame(width: max(1, geo.size.width - 24), height: max(1, geo.size.height - 60))
+                        .clipped()
                 } else if clip.isLoadingPreview {
                     ProgressView().scaleEffect(1.2)
                 } else {
@@ -164,6 +211,8 @@ struct PreviewContent: View {
                     .background(Color.black.opacity(0.7))
                 }
             }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .clipped()
         }
         .onDisappear { clip.stopPlayback(refreshPreview: false) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
@@ -237,7 +286,7 @@ struct PreviewHeader: View {
         }
     }
     private var modes: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 12) {
             PreviewModeControl(mode: Binding(get: { clip.previewMode }, set: { clip.previewMode = $0 }),
                                isEnabled: !isExporting)
                 .fixedSize()
@@ -248,13 +297,38 @@ struct PreviewHeader: View {
         }
 
     }
+    private var zoomControls: some View {
+        HStack(spacing: 4) {
+            Text("\(Int((clip.previewZoom * 100).rounded()))%")
+                .font(.system(size: 11)).monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 36, alignment: .trailing)
+                .padding(.leading, 4)
+                .help("Zoom relative to fit")
+                .accessibilityLabel("Zoom \(Int((clip.previewZoom * 100).rounded())) percent")
+            zoomButton("Zoom in (⌘+)", symbol: "plus.magnifyingglass", action: clip.zoomIn)
+            zoomButton("Zoom out (⌘−)", symbol: "minus.magnifyingglass", action: clip.zoomOut)
+            zoomButton("Reset zoom (Z)", symbol: "arrow.counterclockwise", action: clip.resetZoom)
+        }.fixedSize()
+    }
+    private func zoomButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: symbol).frame(width: 16, height: 16) }
+            .buttonStyle(.bordered).controlSize(.small).font(.system(size: 12))
+            .help(title).accessibilityLabel(title)
+    }
+    private var controls: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) { zoomControls; modes }
+            VStack(alignment: .trailing, spacing: 6) { zoomControls; modes }
+        }
+    }
     var body: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) { details; Spacer(minLength: 8); modes }
+            HStack(spacing: 12) { details; Spacer(minLength: 8); controls }
                 .frame(height: PanelLayout.headerHeight)
             VStack(alignment: .leading, spacing: 6) {
                 details
-                HStack { Spacer(minLength: 0); modes }
+                HStack { Spacer(minLength: 0); controls }
             }
             .padding(.vertical, 8)
         }

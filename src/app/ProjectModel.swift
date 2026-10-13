@@ -305,6 +305,14 @@ final class ClipModel: Identifiable, ObservableObject {
     }
 
     @Published private(set) var isPlaying = false
+    @Published private(set) var previewZoom: CGFloat = 1
+    func zoomPreview(by factor: CGFloat) {
+        guard factor.isFinite, factor > 0 else { return }
+        previewZoom = min(8, max(0.25, previewZoom * factor))
+    }
+    func zoomIn() { zoomPreview(by: 1.25) }
+    func zoomOut() { zoomPreview(by: 0.8) }
+    func resetZoom() { previewZoom = 1 }
     @Published private(set) var playbackDirection: PlaybackDirection = .forward
     var onPlaybackFinished: ((ClipModel, PlaybackDirection) -> Void)?
     @Published private(set) var playbackFrame: DecodedPixels?
