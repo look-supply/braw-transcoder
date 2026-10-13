@@ -4,18 +4,28 @@ struct ExportView: View {
     @ObservedObject var project: ProjectModel
     @StateObject private var exportMgr: ExportManager
     @State private var showingSettings = false
-    @State private var selectedCodec = 1
-    @State private var selectedProResProfile = 3
-    @State private var selectedResolution = 0
-    @State private var selectedDataRate = 4
-    @State private var selectedGOPMode = 0
-    @State private var selectedChroma = 1
-    @State private var selectedPreset = 0
+    @AppStorage("exportLastCodec") private var selectedCodec = 1
+    @AppStorage("exportLastProResProfile") private var selectedProResProfile = 3
+    @AppStorage("exportLastResolution") private var selectedResolution = 0
+    @AppStorage("exportLastDataRate") private var selectedDataRate = 4
+    @AppStorage("exportLastGOPMode") private var selectedGOPMode = 0
+    @AppStorage("exportLastChroma") private var selectedChroma = 1
+    @AppStorage("exportLastPreset") private var selectedPreset = 0
     @State private var presetName = ""
     @State private var showingSavePreset = false
     @AppStorage("exportPresetsJSON") private var savedPresetsJSON = "[]"
-    @AppStorage("exportOutputDirectory") private var outputDir = ""
+    @AppStorage("exportOutputDirectory") private var outputDir = Self.defaultOutputDirectory
     @AppStorage("exportUseSourceDirectory") private var useSourceDirectory = true
+
+    private static var defaultOutputDirectory: String {
+        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first?.path
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads").path
+    }
+
+    private var resolvedOutputDirectory: String {
+        let path = outputDir.trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? Self.defaultOutputDirectory : path
+    }
 
     init(project: ProjectModel, manager: ExportManager? = nil) {
         self.project = project
@@ -30,11 +40,11 @@ struct ExportView: View {
         (0, "Original resolution"), (5, "4320 pixels high (8K)"),
         (6, "3240 pixels high (6K)"), (1, "2160 pixels high (4K)"), (3, "1080 pixels high (2K)")
     ]
-    let dataRates = ["30 Mbps", "50 Mbps", "100 Mbps", "150 Mbps", "200 Mbps", "250 Mbps", "300 Mbps", "400 Mbps", "500 Mbps", "600 Mbps"]
-    let dataRateValues = [30, 50, 100, 150, 200, 250, 300, 400, 500, 600]
+    let dataRates = ["30 Mbps", "50 Mbps", "100 Mbps", "150 Mbps", "200 Mbps", "250 Mbps", "300 Mbps", "400 Mbps", "500 Mbps", "600 Mbps", "800 Mbps"]
+    let dataRateValues = [30, 50, 100, 150, 200, 250, 300, 400, 500, 600, 800]
 
     var availableResolutionModes: [Int] {
-        guard let clip = project.selectedClip else { return [0] }
+        guard let clip = project.selectedClip else { return resolutions.map(\.mode) }
         return resolutions.compactMap { option in
             if option.mode == 0 { return 0 }
             var width: Int32 = 0, height: Int32 = 0
@@ -79,8 +89,8 @@ struct ExportView: View {
                         formatSummary
                         Spacer(minLength: 0)
                         settingsButton
-                        exportSelectedButton
                         exportAllButton
+                        exportSelectedButton
                     }
                     VStack(alignment: .leading, spacing: 12) {
                         HStack(spacing: 12) {
@@ -90,8 +100,8 @@ struct ExportView: View {
                         }
                         HStack(spacing: 8) {
                             Spacer(minLength: 0)
-                            exportSelectedButton
                             exportAllButton
+                            exportSelectedButton
                         }
                     }
                 }
@@ -105,8 +115,10 @@ struct ExportView: View {
         }
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
         .sheet(isPresented: $showingSettings) { settingsSheet }
-        .onChange(of: availableResolutionModes, initial: true) { _, modes in
-            if !modes.contains(selectedResolution) { selectedResolution = 0 }
+        .onChange(of: useSourceDirectory, initial: true) { _, sameAsSource in
+            if !sameAsSource && outputDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                outputDir = Self.defaultOutputDirectory
+            }
         }
     }
 
@@ -117,7 +129,7 @@ struct ExportView: View {
     }
 
     private var settingsSummaryLines: [String] {
-        let outputFolder = useSourceDirectory ? "Same as source" : (outputDir.isEmpty ? "Choose output folder" : outputDir)
+        let outputFolder = useSourceDirectory ? "Same as source" : resolvedOutputDirectory
         let dimensions = project.selectedClip == nil
             ? (resolutions.first { $0.mode == effectiveResolution }?.label ?? "Original resolution")
             : estimatedOutput
@@ -130,19 +142,21 @@ struct ExportView: View {
                 "\(dimensions) · \(outputFolder)"]
     }
 
-    private var settingsSummary: String { settingsSummaryLines.joined(separator: " · ") }
+    private var settingsSummary: String {
+        let settings = settingsSummaryLines.joined(separator: " · ")
+        let presetIndex = presetSelection.wrappedValue
+        guard presetIndex > 0 else { return settings }
+        return "\(savedPresets[presetIndex - 1].name): \(settings)"
+    }
 
     private var formatSummary: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            ForEach(Array(settingsSummaryLines.enumerated()), id: \.offset) { _, line in
-                Text(line).lineLimit(1).truncationMode(.middle)
-            }
-        }
-        .font(.system(size: 11, weight: .medium))
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Export settings: \(settingsSummary)")
-        .accessibilityIdentifier("export-format-summary")
+        Text(settingsSummary)
+            .font(.system(size: 11, weight: .medium))
+            .lineLimit(1).truncationMode(.tail)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .help(settingsSummary)
+            .accessibilityLabel("Export settings: \(settingsSummary)")
+            .accessibilityIdentifier("export-format-summary")
     }
 
     private var settingsButton: some View {
@@ -282,9 +296,7 @@ struct ExportView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.prompt = "Select"
-        if !outputDir.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: (outputDir as NSString).expandingTildeInPath)
-        }
+        panel.directoryURL = URL(fileURLWithPath: (resolvedOutputDirectory as NSString).expandingTildeInPath)
         if panel.runModal() == .OK { outputDir = panel.url?.path ?? "" }
     }
 
@@ -297,7 +309,7 @@ struct ExportView: View {
         settings.dataRateMbps = dataRateValues[selectedDataRate]
         settings.gopMode = selectedGOPMode
         settings.chromaMode = selectedChroma
-        settings.outputDir = useSourceDirectory ? "" : outputDir.trimmingCharacters(in: .whitespacesAndNewlines)
+        settings.outputDir = useSourceDirectory ? "" : resolvedOutputDirectory
         settings.selectedIndices = selectedOnly ? project.selectedIndices.sorted() : []
         exportMgr.export(settings: settings)
     }
@@ -337,7 +349,6 @@ struct ExportView: View {
         selectedDataRate = preset.dataRate
         selectedGOPMode = preset.gopMode
         selectedChroma = preset.chroma
-        selectedDataRate = preset.dataRate
     }
 
     private func savePreset() {

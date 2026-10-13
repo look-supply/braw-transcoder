@@ -1,4 +1,6 @@
+# Local builds and generated bundles
 build/
+build-*/
 .DS_Store
 *.o
 *.obj
@@ -11,5 +13,29 @@ cmake_install.cmake
 Makefile
 compile_commands.json
 braw_memory_trace.log
+*.log
 
-build-*/
+# Generated icon intermediates (scripts/make_icon.py recreates these)
+src/app/AppIcon.iconset/
+
+# Local editor and agent configuration
+opencode.json
+.agents/
+.codex/
+.claude/
+AGENTS.md
+CLAUDE.md
+.cursorrules
+.cursor/
+.github/copilot-instructions.md
+.idea/
+.vscode/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local secrets
+.env
+.env.*
+!.env.example

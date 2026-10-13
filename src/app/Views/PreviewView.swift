@@ -272,7 +272,7 @@ struct PreviewHeader: View {
     let isExporting: Bool
 
     private var colorInfo: String {
-        [clip.renderedGamma, clip.gamut, "Gen \(clip.colorScienceGen)"]
+        [clip.renderedGamma, "Gen \(clip.colorScienceGen)"]
             .filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
