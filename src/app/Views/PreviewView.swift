@@ -145,7 +145,7 @@ struct PreviewNavigation: NSViewRepresentable {
                   deltaX.isFinite, deltaY.isFinite, deltaX != 0 || deltaY != 0 else { return false }
             let keys = modifiers.intersection([.command, .control, .option, .shift])
             clip.setPreviewViewport(bounds.size)
-            if (precise && keys.isEmpty) || keys == .shift {
+            if keys == .shift {
                 guard clip.previewZoom > 1 else { return false }
                 let scale: CGFloat = precise ? 1 : 16
                 clip.panPreview(by: CGSize(width: deltaX * scale, height: deltaY * scale))
@@ -376,7 +376,7 @@ struct PreviewHeader: View {
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 36, alignment: .trailing)
                 .padding(.leading, 4)
-                .help("Zoom relative to fit. Scroll with a trackpad or Magic Mouse, or middle-drag to pan. Hold ⌘ while scrolling to zoom; pinch also zooms.")
+                .help("Zoom relative to fit. Scroll or pinch to zoom. Hold the middle mouse button and drag to pan, or hold Shift while scrolling.")
                 .accessibilityLabel("Zoom \(Int((clip.previewZoom * 100).rounded())) percent")
             zoomButton("Zoom in (⌘+)", symbol: "plus.magnifyingglass", action: clip.zoomIn)
             zoomButton("Zoom out (⌘−)", symbol: "minus.magnifyingglass", action: clip.zoomOut)

@@ -70,16 +70,22 @@ import SwiftUI
         defer { view.removeMonitor(); window.orderOut(nil); clip.resetZoom() }
         let center = NSPoint(x: 200, y: 150)
         clip.resetZoom()
-        precondition(!view.handleScroll(deltaX: 20, deltaY: 10, precise: true, location: center, eventWindow: window),
-                     "Trackpad pan zoomed a fitted image")
+        precondition(!view.handleScroll(deltaX: 20, deltaY: 10, precise: true, modifiers: .shift, location: center, eventWindow: window),
+                     "Shift-scroll pan changed a fitted image")
         precondition(!view.beginPan(location: center, eventWindow: window), "Middle drag started at fit")
+        for precise in [false, true] {
+            clip.resetZoom()
+            precondition(view.handleScroll(deltaX: 0, deltaY: 20, precise: precise,
+                location: center, eventWindow: window) && clip.previewZoom > 1 && clip.previewPan == .zero,
+                "Unmodified mouse wheel did not zoom")
+        }
         precondition(view.handleScroll(deltaX: 0, deltaY: 50, precise: true, modifiers: .command,
             location: center, eventWindow: window) && clip.previewZoom > 1, "Command-scroll did not zoom")
         clip.resetZoom(); clip.zoomPreview(by: 4)
         let zoom = clip.previewZoom
-        precondition(view.handleScroll(deltaX: 40, deltaY: 20, precise: true, location: center, eventWindow: window))
+        precondition(view.handleScroll(deltaX: 40, deltaY: 20, precise: true, modifiers: .shift, location: center, eventWindow: window))
         precondition(clip.previewPan.width > 0 && clip.previewPan.height > 0 && clip.previewZoom == zoom,
-                     "Trackpad did not pan both axes without changing zoom")
+                     "Shift-scroll did not pan both axes without changing zoom")
         let offset = clip.previewPan
         precondition(!view.handleScroll(deltaX: 20, deltaY: 20, precise: true,
             location: NSPoint(x: -20, y: -20), eventWindow: window) && clip.previewPan == offset,
