@@ -44,7 +44,63 @@ import SwiftUI
             zoomedPixels.append(Data(bytes: readback.contents().advanced(by: 256), count: 8))
             precondition(zoomedPixels == Data([0,0,0,255, 0,0,0,255, 0,0,0,255, 0,0,0,255]),
                          "Zoom-out sampled beyond the image instead of showing black borders")
+            renderer.zoom = 4
+            renderer.pan = SIMD2<Float>(repeating: 0.375)
+            let panned = queue.makeCommandBuffer()!
+            precondition(renderer.encode(DecodedPixels(data: input, width: 2, height: 2), pass: pass, command: panned))
+            let panCopy = panned.makeBlitCommandEncoder()!
+            panCopy.copy(from: texture, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                         sourceSize: MTLSize(width: 2, height: 2, depth: 1), to: readback,
+                         destinationOffset: 0, destinationBytesPerRow: 256, destinationBytesPerImage: 512)
+            panCopy.endEncoding(); panned.commit(); panned.waitUntilCompleted()
+            var panPixels = Data(bytes: readback.contents(), count: 8)
+            panPixels.append(Data(bytes: readback.contents().advanced(by: 256), count: 8))
+            precondition(panPixels == Data([0,0,255,255, 0,0,255,255, 0,0,255,255, 0,0,255,255]),
+                         "Metal pan did not reveal the top-left image corner")
         }
+    }
+
+    @MainActor static func checkPreviewNavigation(clip: ClipModel) throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let view = PreviewNavigation.Anchor()
+        view.clip = clip
+        window.contentView = view
+        window.orderFront(nil)
+        defer { view.removeMonitor(); window.orderOut(nil); clip.resetZoom() }
+        let center = NSPoint(x: 200, y: 150)
+        clip.resetZoom()
+        precondition(!view.handleScroll(deltaX: 20, deltaY: 10, precise: true, location: center, eventWindow: window),
+                     "Trackpad pan zoomed a fitted image")
+        precondition(!view.beginPan(location: center, eventWindow: window), "Middle drag started at fit")
+        precondition(view.handleScroll(deltaX: 0, deltaY: 50, precise: true, modifiers: .command,
+            location: center, eventWindow: window) && clip.previewZoom > 1, "Command-scroll did not zoom")
+        clip.resetZoom(); clip.zoomPreview(by: 4)
+        let zoom = clip.previewZoom
+        precondition(view.handleScroll(deltaX: 40, deltaY: 20, precise: true, location: center, eventWindow: window))
+        precondition(clip.previewPan.width > 0 && clip.previewPan.height > 0 && clip.previewZoom == zoom,
+                     "Trackpad did not pan both axes without changing zoom")
+        let offset = clip.previewPan
+        precondition(!view.handleScroll(deltaX: 20, deltaY: 20, precise: true,
+            location: NSPoint(x: -20, y: -20), eventWindow: window) && clip.previewPan == offset,
+                     "Scroll outside image changed pan")
+        precondition(view.beginPan(location: center, eventWindow: window))
+        precondition(view.dragPan(location: NSPoint(x: 240, y: 130), eventWindow: window))
+        precondition(clip.previewPan.width > offset.width && clip.previewPan.height > offset.height,
+                     "Middle drag moved the image in the wrong direction")
+        precondition(view.endPan() && !view.dragPan(location: center, eventWindow: window), "Middle drag did not end")
+        clip.panPreview(by: CGSize(width: 1e9, height: -1e9))
+        precondition(clip.previewPan.width < 0.5 && clip.previewPan.height > -0.5, "Pan went beyond the image")
+        clip.setPreviewViewport(CGSize(width: 2000, height: 100))
+        precondition(clip.previewPan.width == 0, "Resizing exposed a horizontal image edge")
+        clip.setPreviewViewport(view.bounds.size)
+        clip.zoomOut()
+        precondition(clip.previewPan.width < 0.5 && clip.previewZoom == 3.2)
+        clip.zoomPreview(by: 0.25)
+        precondition(clip.previewPan == .zero, "Zooming out to fit did not recenter")
+        clip.zoomPreview(by: 4); clip.panPreview(by: CGSize(width: 40, height: 40))
+        clip.resetZoom()
+        precondition(clip.previewPan == .zero && clip.previewZoom == 1, "Reset did not recenter the image")
     }
 
     @MainActor static func checkSelectAllKeyboard(project: ProjectModel) throws {
@@ -137,6 +193,7 @@ import SwiftUI
         clip.resetZoom()
         precondition(clip.previewZoom == 1)
         try checkSelectAllKeyboard(project: project)
+        try checkPreviewNavigation(clip: clip)
         if clip.frameCount < 2 {
             clip.startPlayback()
             try await wait("single-frame playback") { !clip.isPlaying }
@@ -159,13 +216,13 @@ import SwiftUI
         precondition(clip.playbackUsesMetal == (ProcessInfo.processInfo.environment["BRAW_DECODE_PIPELINE"] != "cpu"), "Requested decoder pipeline was not used")
         let audio = braw_clip_get_audio_info(braw_project_get_clip(project.projectHandle, 0))
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap { descendants($0) } }
-        let wheel = descendants(host).compactMap { $0 as? PreviewWheelZoom.Anchor }.first!
+        let wheel = descendants(host).compactMap { $0 as? PreviewNavigation.Anchor }.first!
         precondition(wheel.bounds.width > 300 && wheel.bounds.height > 100, "Wheel target did not fill the preview")
         let center = wheel.convert(NSPoint(x: wheel.bounds.midX, y: wheel.bounds.midY), to: nil)
-        precondition(wheel.handleScroll(delta: 3, precise: false, location: center, eventWindow: previewWindow))
+        precondition(wheel.handleScroll(deltaX: 0, deltaY: 3, precise: false, location: center, eventWindow: previewWindow))
         precondition(clip.previewZoom > 1 && clip.isPlaying, "Wheel zoom paused playback")
         let zoom = clip.previewZoom
-        precondition(!wheel.handleScroll(delta: 3, precise: false, location: NSPoint(x: -100, y: -100), eventWindow: previewWindow) &&
+        precondition(!wheel.handleScroll(deltaX: 0, deltaY: 3, precise: false, location: NSPoint(x: -100, y: -100), eventWindow: previewWindow) &&
                      clip.previewZoom == zoom, "Scrolling outside the preview changed zoom")
         clip.resetZoom()
         let renderer = descendants(host).compactMap { $0 as? MTKView }.first?.delegate as? MetalPlaybackView.Renderer

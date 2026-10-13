@@ -7,14 +7,17 @@ import MetalKit
 struct MetalPlaybackView: NSViewRepresentable {
     let frame: DecodedPixels
     var zoom: CGFloat = 1
+    var pan: CGSize = .zero
 
     func makeNSView(context: Context) -> PlaybackSurface { PlaybackSurface() }
-    func updateNSView(_ view: PlaybackSurface, context: Context) { view.display(frame, zoom: zoom) }
+    func updateNSView(_ view: PlaybackSurface, context: Context) { view.display(frame, zoom: zoom, pan: pan) }
 
     @MainActor final class PlaybackSurface: NSView {
         private let metalView: MTKView
         private let renderer: Renderer?
         private let fallback = NSImageView()
+        private var fallbackZoom: CGFloat = 1
+        private var fallbackPan: CGSize = .zero
 
         init() {
             let device = MTLCreateSystemDefaultDevice()
@@ -37,14 +40,29 @@ struct MetalPlaybackView: NSViewRepresentable {
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-        func display(_ frame: DecodedPixels, zoom: CGFloat) {
+        override func layout() {
+            super.layout()
+            updateFallbackTransform()
+        }
+        private func updateFallbackTransform() {
+            guard let image = fallback.image, image.size.width > 0, image.size.height > 0 else { return }
+            let scale = min(bounds.width / image.size.width, bounds.height / image.size.height)
+            var transform = CGAffineTransform(scaleX: fallbackZoom, y: fallbackZoom)
+            transform.tx = fallbackPan.width * image.size.width * scale * fallbackZoom
+            transform.ty = -fallbackPan.height * image.size.height * scale * fallbackZoom
+            fallback.layer?.setAffineTransform(transform)
+        }
+        func display(_ frame: DecodedPixels, zoom: CGFloat, pan: CGSize = .zero) {
             if let renderer {
                 renderer.frame = frame
                 renderer.zoom = Float(zoom)
+                renderer.pan = SIMD2(Float(pan.width), Float(pan.height))
                 metalView.needsDisplay = true
             } else {
                 fallback.image = makeNSImageBGRA(frame: frame)
-                fallback.layer?.setAffineTransform(CGAffineTransform(scaleX: zoom, y: zoom))
+                fallbackZoom = zoom
+                fallbackPan = pan
+                updateFallbackTransform()
             }
         }
     }
@@ -56,6 +74,7 @@ struct MetalPlaybackView: NSViewRepresentable {
         private let slots = (0..<3).map { _ in TextureSlot() }
         var frame: DecodedPixels?
         var zoom: Float = 1
+        var pan = SIMD2<Float>(repeating: 0)
         private(set) var submittedFrames = 0
 
         init(device: MTLDevice) throws {
@@ -66,6 +85,7 @@ struct MetalPlaybackView: NSViewRepresentable {
                 #include <metal_stdlib>
                 using namespace metal;
                 struct Vertex { float4 position [[position]]; float2 uv; };
+                struct Parameters { float4 geometry; float4 pan; };
                 vertex Vertex playbackVertex(uint i [[vertex_id]]) {
                     const float2 positions[] = {float2(-1,-1), float2(3,-1), float2(-1,3)};
                     Vertex v;
@@ -73,9 +93,9 @@ struct MetalPlaybackView: NSViewRepresentable {
                     v.uv = float2((positions[i].x + 1) * 0.5, (1 - positions[i].y) * 0.5);
                     return v;
                 }
-                fragment float4 playbackFragment(Vertex v [[stage_in]], texture2d<float> image [[texture(0)]], constant float4& parameters [[buffer(0)]]) {
+                fragment float4 playbackFragment(Vertex v [[stage_in]], texture2d<float> image [[texture(0)]], constant Parameters& parameters [[buffer(0)]]) {
                     constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
-                    float2 uv = (v.uv - 0.5) * parameters.yz / parameters.x + 0.5;
+                    float2 uv = (v.uv - 0.5) * parameters.geometry.yz / parameters.geometry.x + 0.5 - parameters.pan.xy;
                     if (any(uv < 0.0) || any(uv > 1.0)) return float4(0, 0, 0, 1);
                     return float4(image.sample(s, uv).rgb, 1);
                 }
@@ -134,9 +154,12 @@ struct MetalPlaybackView: NSViewRepresentable {
             let target = pass.colorAttachments[0].texture!
             let viewportAspect = Float(target.width) / Float(target.height)
             let imageAspect = Float(frame.width) / Float(frame.height)
-            var parameters = SIMD4<Float>(zoom,
-                max(1, viewportAspect / imageAspect), max(1, imageAspect / viewportAspect), 0)
-            encoder.setFragmentBytes(&parameters, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+            let parameters = [SIMD4<Float>(zoom,
+                max(1, viewportAspect / imageAspect), max(1, imageAspect / viewportAspect), 0),
+                SIMD4<Float>(pan.x, pan.y, 0, 0)]
+            parameters.withUnsafeBytes { bytes in
+                encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+            }
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             encoder.endEncoding()
             return true

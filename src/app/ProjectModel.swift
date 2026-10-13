@@ -306,13 +306,51 @@ final class ClipModel: Identifiable, ObservableObject {
 
     @Published private(set) var isPlaying = false
     @Published private(set) var previewZoom: CGFloat = 1
+    // Image-relative translation; positive X/Y moves the picture right/down.
+    @Published private(set) var previewPan: CGSize = .zero
+    private var previewViewport: CGSize = .zero
+    private var previewViewportAspect: CGFloat = 0
+    func setPreviewViewport(_ size: CGSize) {
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return }
+        let aspect = renderAspectRatio
+        guard previewViewport != size || previewViewportAspect != aspect else { return }
+        previewViewport = size
+        previewViewportAspect = aspect
+        clampPreviewPan()
+    }
+    func fittedPreviewSize(in viewport: CGSize) -> CGSize {
+        let aspect = renderAspectRatio
+        return CGSize(width: min(viewport.width, viewport.height * aspect),
+                      height: min(viewport.height, viewport.width / aspect))
+    }
+    func panPreview(by translation: CGSize) {
+        guard previewZoom > 1, translation.width.isFinite, translation.height.isFinite,
+              previewViewport.width > 0, previewViewport.height > 0 else { return }
+        let fitted = fittedPreviewSize(in: previewViewport)
+        clampPreviewPan(CGSize(width: previewPan.width + translation.width / (fitted.width * previewZoom),
+                              height: previewPan.height + translation.height / (fitted.height * previewZoom)))
+    }
+    private func clampPreviewPan(_ proposed: CGSize? = nil) {
+        guard previewZoom > 1, previewViewport.width > 0, previewViewport.height > 0 else {
+            if previewPan != .zero { previewPan = .zero }
+            return
+        }
+        let fitted = fittedPreviewSize(in: previewViewport)
+        let xLimit = max(0, (1 - previewViewport.width / (fitted.width * previewZoom)) / 2)
+        let yLimit = max(0, (1 - previewViewport.height / (fitted.height * previewZoom)) / 2)
+        let offset = proposed ?? previewPan
+        let clamped = CGSize(width: min(xLimit, max(-xLimit, offset.width)),
+                             height: min(yLimit, max(-yLimit, offset.height)))
+        if previewPan != clamped { previewPan = clamped }
+    }
     func zoomPreview(by factor: CGFloat) {
         guard factor.isFinite, factor > 0 else { return }
         previewZoom = min(8, max(0.25, previewZoom * factor))
+        clampPreviewPan()
     }
     func zoomIn() { zoomPreview(by: 1.25) }
     func zoomOut() { zoomPreview(by: 0.8) }
-    func resetZoom() { previewZoom = 1 }
+    func resetZoom() { previewZoom = 1; previewPan = .zero }
     @Published private(set) var playbackDirection: PlaybackDirection = .forward
     var onPlaybackFinished: ((ClipModel, PlaybackDirection) -> Void)?
     @Published private(set) var playbackFrame: DecodedPixels?

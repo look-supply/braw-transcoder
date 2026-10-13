@@ -88,33 +88,94 @@ struct PlaybackKeyboardShortcuts: NSViewRepresentable {
     }
 }
 
-struct PreviewWheelZoom: NSViewRepresentable {
+struct PreviewNavigation: NSViewRepresentable {
     let clip: ClipModel
     func makeNSView(context: Context) -> Anchor { Anchor() }
-    func updateNSView(_ view: Anchor, context: Context) { view.clip = clip }
+    func updateNSView(_ view: Anchor, context: Context) { view.clip = clip; view.updateViewport() }
     static func dismantleNSView(_ view: Anchor, coordinator: ()) { view.removeMonitor() }
     final class Anchor: NSView {
         weak var clip: ClipModel?
         private var monitor: Any?
+        private var dragPoint: NSPoint?
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             removeMonitor()
             guard window != nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                guard let self, self.handleScroll(delta: event.scrollingDeltaY, precise: event.hasPreciseScrollingDeltas,
-                    location: event.locationInWindow, eventWindow: event.window) else { return event }
-                return nil
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .otherMouseDown, .otherMouseDragged, .otherMouseUp, .magnify]) { [weak self] event in
+                guard let self else { return event }
+                switch event.type {
+                case .scrollWheel:
+                    if self.handleScroll(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY,
+                        precise: event.hasPreciseScrollingDeltas, modifiers: event.modifierFlags,
+                        location: event.locationInWindow, eventWindow: event.window) { return nil }
+                case .otherMouseDown:
+                    if event.buttonNumber == 2 && self.beginPan(location: event.locationInWindow, eventWindow: event.window) { return nil }
+                case .otherMouseDragged:
+                    if event.buttonNumber == 2 && self.dragPan(location: event.locationInWindow, eventWindow: event.window) { return nil }
+                case .otherMouseUp:
+                    if event.buttonNumber == 2 && self.endPan() { return nil }
+                case .magnify:
+                    if self.contains(location: event.locationInWindow, eventWindow: event.window), event.magnification.isFinite {
+                        self.clip?.zoomPreview(by: exp(event.magnification))
+                        return nil
+                    }
+                default: break
+                }
+                return event
             }
         }
-        func handleScroll(delta: CGFloat, precise: Bool, location: NSPoint, eventWindow: NSWindow?) -> Bool {
-            guard let window, eventWindow === window, bounds.contains(convert(location, from: nil)),
-                  let clip, delta != 0 else { return false }
+        override func layout() {
+            super.layout()
+            updateViewport()
+        }
+        func updateViewport() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.window != nil else { return }
+                self.clip?.setPreviewViewport(self.bounds.size)
+            }
+        }
+        private func contains(location: NSPoint, eventWindow: NSWindow?) -> Bool {
+            guard let window, eventWindow === window else { return false }
+            return bounds.contains(convert(location, from: nil))
+        }
+        func handleScroll(deltaX: CGFloat, deltaY: CGFloat, precise: Bool, modifiers: NSEvent.ModifierFlags = [],
+                          location: NSPoint, eventWindow: NSWindow?) -> Bool {
+            guard contains(location: location, eventWindow: eventWindow), let clip,
+                  deltaX.isFinite, deltaY.isFinite, deltaX != 0 || deltaY != 0 else { return false }
+            let keys = modifiers.intersection([.command, .control, .option, .shift])
+            clip.setPreviewViewport(bounds.size)
+            if (precise && keys.isEmpty) || keys == .shift {
+                guard clip.previewZoom > 1 else { return false }
+                let scale: CGFloat = precise ? 1 : 16
+                clip.panPreview(by: CGSize(width: deltaX * scale, height: deltaY * scale))
+                return true
+            }
+            guard (keys.isEmpty || keys == .command), deltaY != 0 else { return false }
             let sensitivity: Double = precise ? 0.006 : 0.08
-            clip.zoomPreview(by: CGFloat(exp(max(-1, min(1, Double(delta) * sensitivity)))))
+            clip.zoomPreview(by: CGFloat(exp(max(-1, min(1, Double(deltaY) * sensitivity)))))
             return true
         }
+        func beginPan(location: NSPoint, eventWindow: NSWindow?) -> Bool {
+            guard contains(location: location, eventWindow: eventWindow), let clip, clip.previewZoom > 1 else { return false }
+            clip.setPreviewViewport(bounds.size)
+            dragPoint = location
+            return true
+        }
+        func dragPan(location: NSPoint, eventWindow: NSWindow?) -> Bool {
+            guard let previous = dragPoint, let window, eventWindow === window, let clip else { return false }
+            clip.setPreviewViewport(bounds.size)
+            clip.panPreview(by: CGSize(width: location.x - previous.x, height: previous.y - location.y))
+            dragPoint = location
+            return true
+        }
+        @discardableResult func endPan() -> Bool {
+            let active = dragPoint != nil
+            dragPoint = nil
+            return active
+        }
         func removeMonitor() {
+            endPan()
             if let monitor { NSEvent.removeMonitor(monitor) }
             monitor = nil
         }
@@ -128,27 +189,33 @@ struct PreviewContent: View {
     
     var body: some View {
         GeometryReader { geo in
+            let viewport = CGSize(width: max(1, geo.size.width - 24), height: max(1, geo.size.height - 60))
+            let fitted = clip.fittedPreviewSize(in: viewport)
             ZStack {
                 Color.black.opacity(0.92)
                     .overlay {
-                        PreviewWheelZoom(clip: clip)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .padding(.bottom, 60)
+                        PreviewNavigation(clip: clip)
+                            .frame(width: viewport.width, height: viewport.height)
+                            .offset(y: -30)
                     }
                 
                 let aspect = clip.renderAspectRatio
                 
                 if let frame = clip.playbackFrame {
-                    MetalPlaybackView(frame: frame, zoom: clip.previewZoom)
-                        .frame(width: max(1, geo.size.width - 24), height: max(1, geo.size.height - 60))
+                    MetalPlaybackView(frame: frame, zoom: clip.previewZoom, pan: clip.previewPan)
+                        .frame(width: viewport.width, height: viewport.height)
+                        .offset(y: -30)
                 } else if let preview = clip.preview {
                     Image(nsImage: preview)
                         .resizable()
                         .aspectRatio(aspect, contentMode: .fit)
-                        .frame(width: max(1, geo.size.width - 24), height: max(1, geo.size.height - 60))
+                        .frame(width: viewport.width, height: viewport.height)
                         .scaleEffect(clip.previewZoom)
-                        .frame(width: max(1, geo.size.width - 24), height: max(1, geo.size.height - 60))
+                        .offset(x: clip.previewPan.width * clip.previewZoom * fitted.width,
+                                y: clip.previewPan.height * clip.previewZoom * fitted.height)
+                        .frame(width: viewport.width, height: viewport.height)
                         .clipped()
+                        .offset(y: -30)
                 } else if clip.isLoadingPreview {
                     ProgressView().scaleEffect(1.2)
                 } else {
@@ -309,7 +376,7 @@ struct PreviewHeader: View {
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 36, alignment: .trailing)
                 .padding(.leading, 4)
-                .help("Zoom relative to fit")
+                .help("Zoom relative to fit. Scroll with a trackpad or Magic Mouse, or middle-drag to pan. Hold ⌘ while scrolling to zoom; pinch also zooms.")
                 .accessibilityLabel("Zoom \(Int((clip.previewZoom * 100).rounded())) percent")
             zoomButton("Zoom in (⌘+)", symbol: "plus.magnifyingglass", action: clip.zoomIn)
             zoomButton("Zoom out (⌘−)", symbol: "minus.magnifyingglass", action: clip.zoomOut)
