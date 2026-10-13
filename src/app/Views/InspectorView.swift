@@ -1,13 +1,148 @@
 import SwiftUI
 
+// A native popup with a flexible intrinsic width, so the control itself fills
+// its row rather than only expanding the SwiftUI frame around it.
+private struct InspectorDropdown: NSViewRepresentable {
+    struct Option: Equatable { let title: String; let value: Int }
+    let title: String
+    let options: [Option]
+    @Binding var selection: Int
+    @Environment(\.isEnabled) private var isEnabled
+
+    final class Popup: NSPopUpButton {
+        override var intrinsicContentSize: NSSize {
+            NSSize(width: NSView.noIntrinsicMetric, height: super.intrinsicContentSize.height)
+        }
+    }
+    @MainActor final class Coordinator: NSObject {
+        var parent: InspectorDropdown
+        var options: [Option] = []
+        init(_ parent: InspectorDropdown) { self.parent = parent }
+        @objc func select(_ sender: NSPopUpButton) {
+            let index = sender.indexOfSelectedItem
+            guard options.indices.contains(index) else { return }
+            parent.selection = options[index].value
+        }
+    }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> Popup {
+        let popup = Popup(frame: .zero, pullsDown: false)
+        popup.target = context.coordinator
+        popup.action = #selector(Coordinator.select(_:))
+        return popup
+    }
+    func updateNSView(_ popup: Popup, context: Context) {
+        context.coordinator.parent = self
+        if context.coordinator.options != options {
+            popup.removeAllItems()
+            popup.addItems(withTitles: options.map(\.title))
+            context.coordinator.options = options
+        }
+        popup.selectItem(at: options.firstIndex { $0.value == selection } ?? -1)
+        popup.isEnabled = isEnabled
+        popup.setAccessibilityLabel(title)
+    }
+}
+
+enum InspectorPanel: CaseIterable { case raw, anamorphic, tone, lens }
+
+private struct CustomDesqueezeField: View {
+    @ObservedObject var clip: ClipModel
+    @State private var draft = ""
+    @State private var invalid = false
+    @FocusState private var isEditing: Bool
+
+    private func syncDraft() {
+        draft = clip.customDesqueeze.formatted(.number.precision(.fractionLength(0...4)).grouping(.never))
+    }
+    private func commit() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ",", with: ".")
+        guard let ratio = Float(text), ratio.isFinite, (1...4).contains(ratio) else {
+            invalid = true
+            return
+        }
+        invalid = false
+        if ratio != clip.customDesqueeze { clip.customDesqueeze = ratio }
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ResettableSettingLabel(title: "Custom ratio") {
+                clip.customDesqueeze = 2
+                syncDraft()
+            }.font(.system(size: 10)).foregroundStyle(.secondary)
+            HStack {
+                // Keep partial input such as "1." local until editing finishes.
+                // Updating decode settings per keystroke can redraw the field.
+                TextField("e.g. 1.33", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isEditing)
+                    .onSubmit { commit() }
+                    .accessibilityLabel("Custom desqueeze ratio")
+                    .help("Enter a desqueeze ratio from 1 to 4, such as 1.33 or 1.5.")
+                Text(":1").foregroundStyle(.secondary)
+            }
+            if invalid {
+                Text("Enter a ratio from 1 to 4.").font(.caption).foregroundStyle(.red)
+            }
+        }
+        .onAppear { syncDraft() }
+        .onChange(of: draft) { _, _ in invalid = false }
+        .onChange(of: isEditing) { _, editing in if !editing { commit() } }
+        .onChange(of: clip.customDesqueeze) { _, _ in if !isEditing { syncDraft() } }
+    }
+}
+
+struct InspectorSection<Content: View>: View {
+    let title: String
+    let summary: String
+    var showsDivider = true
+    @Binding var isExpanded: Bool
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        // Match the 16pt spacing before the next section across the divider.
+        VStack(spacing: 16) {
+            DisclosureGroup(isExpanded: $isExpanded) {
+                content().padding(.top, 8)
+            } label: {
+                Button {
+                    isExpanded.toggle()
+                } label: {
+                    HStack {
+                        Text(title).font(.headline)
+                        Spacer(minLength: 8)
+                        Text(summary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(title)
+                .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            }
+            if showsDivider { Divider() }
+        }
+    }
+}
+
 struct InspectorView: View {
     @ObservedObject var project: ProjectModel
+    @State private var expandedPanels: Set<InspectorPanel> = [.raw]
     
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Image(systemName: "slider.horizontal.3").foregroundColor(.secondary)
                 Text("Inspector").font(.headline).foregroundColor(.secondary)
+                Spacer()
+                Menu {
+                    Button("Expand All") { expandedPanels = Set(InspectorPanel.allCases) }
+                    Button("Collapse All") { expandedPanels = [] }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton).frame(width: 20)
+                .help("Expand or collapse Inspector sections")
+                .accessibilityLabel("Inspector sections")
             }
             .padding(.horizontal, 12)
             .frame(height: PanelLayout.headerHeight)
@@ -16,7 +151,10 @@ struct InspectorView: View {
             Divider()
             
             if let clip = project.selectedClip {
-                InspectorContent(clip: clip, project: project)
+                InspectorContent(clip: clip, project: project, expandedPanels: $expandedPanels)
+                Divider()
+                InspectorFooter(clip: clip, project: project)
+                    .fixedSize(horizontal: false, vertical: true)
                 Divider()
                 RGBWaveformView(clip: clip)
             } else {
@@ -37,32 +175,80 @@ struct InspectorView: View {
 struct InspectorContent: View {
     @ObservedObject var clip: ClipModel
     @ObservedObject var project: ProjectModel
+    @Binding var expandedPanels: Set<InspectorPanel>
     var isExporting: Bool { project.isExporting }
     
+    private let anamorphicLabels = ["As shot", "Off", "1.33×", "1.5×", "1.6×", "1.66×", "1.8×", "2×", "Custom"]
+    private let toneLabels = ["Contrast", "Saturation", "Midpoint", "Highlight rolloff", "Shadow rolloff", "Black level", "White level"]
+    private var rawSummary: String {
+        clip.iso == clip.nativeISO && clip.colorTemp == clip.nativeColorTemp && clip.tint == clip.nativeTint &&
+            clip.exposure == 0 && !clip.highlightRecovery && !clip.gamutCompression ? "As shot" : "Adjusted"
+    }
+    private var lensSummary: String {
+        clip.lensCorrections == 0 ? "Off" : "\(clip.lensCorrections.nonzeroBitCount) enabled"
+    }
+    private func expansion(_ panel: InspectorPanel) -> Binding<Bool> {
+        Binding(get: { expandedPanels.contains(panel) }, set: { expanded in
+            if expanded { expandedPanels.insert(panel) } else { expandedPanels.remove(panel) }
+        })
+    }
+    private func switchRow(_ title: String, isOn: Binding<Bool>, initialValue: Bool = false) -> some View {
+        HStack {
+            ResettableSettingLabel(title: title) { isOn.wrappedValue = initialValue }
+            Spacer(minLength: 8)
+            Toggle(title, isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .fixedSize()
+                .accessibilityLabel(title)
+        }
+    }
+    private var geometryButtons: some View {
+        GroupBox {
+            HStack(spacing: 10) {
+                Button { clip.rotation = (clip.rotation + 1) % 4 } label: {
+                    Image(systemName: "rotate.right")
+                }
+                .help("Rotate 90° clockwise").accessibilityLabel("Rotate clockwise")
+                Toggle(isOn: $clip.flipHorizontal) {
+                    Image(systemName: "arrow.left.and.right.righttriangle.left.righttriangle.right")
+                }.toggleStyle(.button).help("Flip horizontally").accessibilityLabel("Flip horizontally")
+                Toggle(isOn: $clip.flipVertical) {
+                    Image(systemName: "arrow.up.and.down.righttriangle.up.righttriangle.down")
+                }.toggleStyle(.button).help("Flip vertically").accessibilityLabel("Flip vertically")
+                Spacer(minLength: 4)
+                Text("\(clip.rotation * 90)°").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+            }
+            .buttonStyle(.bordered).controlSize(.small)
+            .disabled(isExporting)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                GroupBox(label: Text("RAW Adjustments").font(.headline)) {
+                geometryButtons
+                InspectorSection(title: "RAW adjustments", summary: rawSummary, isExpanded: expansion(.raw)) {
                     VStack(alignment: .leading, spacing: 12) {
                         // ── ISO Preset Dropdown ──────────────
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("ISO").font(.system(size: 10)).foregroundColor(.secondary)
-                            Picker(selection: Binding<Int>(
+                            ResettableSettingLabel(title: "ISO") { clip.applyISOPreset(0) }
+                                .font(.system(size: 11, weight: .medium))
+                                .disabled(isExporting || clip.isoReadOnly)
+                            InspectorDropdown(title: "ISO", options:
+                                [.init(title: "\(clip.nativeISO) (As Shot)", value: 0)] +
+                                clip.isoPresets.enumerated().map { .init(title: "\($0.element)", value: $0.offset + 1) },
+                                selection: Binding<Int>(
                                 get: { clip.isoPresetIndex },
                                 set: { clip.applyISOPreset($0) }
-                            )) {
-                                Text("\(clip.nativeISO) (As Shot)").tag(0)
-                                ForEach(0..<clip.isoPresets.count, id: \.self) { i in
-                                    Text("\(clip.isoPresets[i])").tag(i + 1)
-                                }
-                            } label: { EmptyView() }
-                            .pickerStyle(.menu)
+                            ))
                             .frame(maxWidth: .infinity)
                             .disabled(isExporting || clip.isoReadOnly)
                             .help("ISO cannot switch the sensor gain used during recording. Use Exposure for brightness changes outside this range.")
                             
-                            Text(clip.isoReadOnly ? "ISO is fixed for this recording." : "Available ISO values follow the recorded sensor gain.")
-                                .font(.system(size: 10)).foregroundColor(.secondary)
                             if let notice = clip.isoAdjustmentNotice {
                                 Text(notice).font(.caption).foregroundColor(.orange)
                             }
@@ -71,16 +257,15 @@ struct InspectorContent: View {
                         
                         // ── Color Temp Preset Dropdown ───────
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("White Balance").font(.system(size: 10)).foregroundColor(.secondary)
-                            Picker(selection: Binding<Int>(
+                            ResettableSettingLabel(title: "White Balance") { clip.applyColorPreset(0) }
+                                .font(.system(size: 11, weight: .medium))
+                                .disabled(isExporting)
+                            InspectorDropdown(title: "White Balance", options:
+                                ClipModel.colorPresetLabels.enumerated().map { .init(title: $0.element, value: $0.offset) },
+                                selection: Binding<Int>(
                                 get: { clip.colorPresetIndex },
                                 set: { clip.applyColorPreset($0) }
-                            )) {
-                                ForEach(0..<ClipModel.colorPresetLabels.count, id: \.self) { i in
-                                    Text(ClipModel.colorPresetLabels[i]).tag(i)
-                                }
-                            } label: { EmptyView() }
-                            .pickerStyle(.menu)
+                            ))
                             .frame(maxWidth: .infinity)
                             .disabled(isExporting)
                             
@@ -88,92 +273,144 @@ struct InspectorContent: View {
                             let isCustomWB = clip.colorPresetIndex == ClipModel.colorPresetLabels.count - 1
                             
                             if isAsShot || isCustomWB {
-                                VStack(spacing: 4) {
-                                    HStack {
-                                        Text("Temp").font(.system(size: 10)).foregroundColor(.secondary)
-                                        Spacer()
-                                        Text("\(clip.colorTemp)K")
-                                            .font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
-                                    }
-                                    Slider(value: Binding<Double>(
+                                VStack(alignment: .leading, spacing: 12) {
+                                    NumericSlider(title: "Temp", value: Binding(
                                         get: { Double(clip.colorTemp) },
                                         set: { clip.colorTemp = UInt32($0) }
-                                    ), in: 2000...50000).controlSize(.small)
-                                    .disabled(isExporting)
-                                    
-                                    HStack {
-                                        Text("Tint").font(.system(size: 10)).foregroundColor(.secondary)
-                                        Spacer()
-                                        Text("\(clip.tint)")
-                                            .font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
-                                    }
-                                    Slider(value: Binding<Double>(
+                                    ), range: 2000...50000, initialValue: Double(clip.nativeColorTemp),
+                                      step: 1, scrubStep: 10, precision: 0, suffix: "K")
+                                        .id("\(clip.id)-temperature")
+                                    NumericSlider(title: "Tint", value: Binding(
                                         get: { Double(clip.tint) },
                                         set: { clip.tint = Int16($0) }
-                                    ), in: -50...50).controlSize(.small)
-                                    .disabled(isExporting)
+                                    ), range: -50...50, initialValue: Double(clip.nativeTint),
+                                      step: 1, scrubStep: 0.2, precision: 0)
+                                        .id("\(clip.id)-tint")
                                 }
+                                .padding(.top, 8)
+                                .disabled(isExporting)
                             }
                         }
                         .frame(maxWidth: .infinity)
                         
                         // ── Exposure ─────────────────────────
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("Exposure").font(.system(size: 11, weight: .medium))
-                                Spacer()
-                                Text(String(format: "%.2f", clip.exposure))
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                            }
-                            Slider(value: Binding<Double>(
-                                get: { Double(clip.exposure) },
-                                set: { clip.exposure = Float($0) }
-                            ), in: -5...5).controlSize(.small)
-                            .disabled(isExporting)
-                        }
+                        NumericSlider(title: "Exposure", value: Binding(
+                            get: { Double(clip.exposure) },
+                            set: { clip.exposure = Float($0) }
+                        ), range: -5...5, initialValue: 0, step: 0.01, scrubStep: 0.01, precision: 2)
+                        .id("\(clip.id)-exposure")
+                        .disabled(isExporting)
                         
-                        Divider()
-                        
-                        Button(action: { project.applyClipSettingsToAll(from: project.selectedIndex) }) {
-                            Label("Apply to All Clips", systemImage: "square.and.arrow.down")
+                        VStack(alignment: .leading, spacing: 12) {
+                            switchRow("Highlight recovery", isOn: $clip.highlightRecovery)
+                                .help("Reconstruct clipped highlights. Compare with it off to judge whether recovery improves this shot.")
+                            switchRow("Gamut compression", isOn: $clip.gamutCompression)
+                                .help("Apply Blackmagic RAW gamut compression before rendering previews and exports. The source BRAW is unchanged.")
                         }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 11))
-                        .foregroundColor(.accentColor)
+                        .toggleStyle(.switch)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .disabled(isExporting)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 4)
                 }
                 .frame(maxWidth: .infinity)
-                
-                GroupBox(label: Text("Highlight Recovery").font(.headline)) {
-                    Toggle("Enable", isOn: $clip.highlightRecovery)
-                        .help("Reconstruct clipped highlights. Compare with it off to judge whether recovery improves this shot.")
-                        .padding(.vertical, 2)
+
+                InspectorSection(title: "Anamorphic", summary: anamorphicLabels[clip.anamorphicMode], isExpanded: expansion(.anamorphic)) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ResettableSettingLabel(title: "Desqueeze") { clip.anamorphicMode = 0 }
+                            .font(.system(size: 11, weight: .medium))
+                            .disabled(isExporting)
+                        InspectorDropdown(title: "Desqueeze", options:
+                            anamorphicLabels.enumerated().map { .init(title: $0.element, value: $0.offset) },
+                            selection: $clip.anamorphicMode)
+                        .frame(maxWidth: .infinity)
                         .disabled(isExporting)
+                    }
+                    if clip.anamorphicMode == 8 {
+                        CustomDesqueezeField(clip: clip)
+                            .id(clip.id)
+                            .disabled(isExporting)
+                    }
                 }
-                
-                GroupBox(label: Text("LUT").font(.headline)) {
-                    Toggle("Preview Embedded LUT", isOn: $clip.previewLUT)
-                        .padding(.vertical, 2)
-                        .disabled(isExporting)
+                InspectorSection(title: "Tone curve", summary: clip.toneCurveEnabled ? "Custom" : "Off", isExpanded: expansion(.tone)) {
+                    switchRow("Custom tone curve", isOn: $clip.toneCurveEnabled)
+                        .toggleStyle(.switch)
+                        .disabled(isExporting || !clip.toneCurveSupported)
+                    if clip.toneCurveSupported {
+                        VStack(spacing: 12) {
+                            ForEach(0..<toneLabels.count, id: \.self) { index in
+                                NumericSlider(title: toneLabels[index], value: Binding(
+                                    get: { Double(clip.toneValues[index]) },
+                                    set: { clip.toneValues[index] = Float($0) }
+                                ), range: Double(clip.toneRanges[index].minimum)...Double(clip.toneRanges[index].maximum),
+                                  initialValue: Double(clip.toneDefaults[index]), step: 0.001, scrubStep: 0.005, precision: 3)
+                                    .id("\(clip.id)-tone-\(index)")
+                            }
+                            switchRow("Video black level", isOn: $clip.videoBlack, initialValue: clip.defaultVideoBlack)
+                                .toggleStyle(.switch).disabled(!clip.videoBlackSupported)
+                            Button("Reset Tone Curve") {
+                                clip.toneValues = clip.toneDefaults
+                                clip.videoBlack = clip.defaultVideoBlack
+                            }.controlSize(.small)
+                        }
+                        .disabled(isExporting || !clip.toneCurveEnabled)
+                    }
+                }
+                InspectorSection(title: "Lens correction", summary: lensSummary, showsDivider: false, isExpanded: expansion(.lens)) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(0..<3) { index in
+                            let flag = UInt32(1) << index
+                            let supported = clip.lensCorrectionSupport & flag != 0
+                            switchRow(["Distortion correction", "Shading correction", "Chromatic aberration"][index],
+                                   isOn: Binding(
+                                    get: { clip.lensCorrections & flag != 0 },
+                                    set: { enabled in
+                                        clip.lensCorrections = enabled ? clip.lensCorrections | flag : clip.lensCorrections & ~flag
+                                    }
+                                   ))
+                                .disabled(isExporting || !supported)
+                                .help(supported ? "Apply the source clip’s lens correction during decoding and export." : "The source clip does not provide an adjustable correction for this setting.")
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
                 }
             }
             .padding(12)
-            
-            Divider()
-            
-            Button(action: { clip.resetAdjustments() }) {
+        }
+    }
+}
+
+struct InspectorFooter: View {
+    @ObservedObject var clip: ClipModel
+    @ObservedObject var project: ProjectModel
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Button { project.applyClipSettingsToAll(from: project.selectedIndex) } label: {
+                Label("Apply to All Clips", systemImage: "square.and.arrow.down")
+                    .frame(maxWidth: .infinity)
+            }
+            Button { clip.resetAdjustments() } label: {
                 Label("Reset Adjustments", systemImage: "arrow.counterclockwise")
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(isExporting)
-            .padding(.horizontal, 12)
-            .padding(.bottom, 12)
+            HStack {
+                ResettableSettingLabel(title: "Preview embedded LUT") { clip.previewLUT = true }
+                Spacer(minLength: 8)
+                Toggle("Preview embedded LUT", isOn: $clip.previewLUT)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .fixedSize()
+                    .accessibilityLabel("Preview embedded LUT")
+            }
         }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(project.isExporting)
+        .padding(12)
     }
 }

@@ -4,6 +4,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <array>
 
 enum class TargetHeightPreset {
     HEIGHT_2160_4K_DCI,
@@ -81,13 +82,29 @@ enum class DataRateMbps {
 
 constexpr int DataRateValue(DataRateMbps r) { return static_cast<int>(r); }
 
+constexpr size_t ToneValueCount=7;
+struct ToneCurveInfo {
+    bool supported=false,videoBlackSupported=false,videoBlack=false;
+    std::array<float,ToneValueCount> defaults{},minimum{},maximum{};
+};
+struct GeometryInfo {
+    // As shot, Off, 1.33x, 1.5x, 1.6x, 1.66x, 1.8x, 2x.
+    std::array<std::array<uint32_t,2>,8> dimensions{};
+};
+
 struct ClipAdjustments {
     uint32_t iso         = 0;
     uint32_t colorTemp   = 5600;
     int16_t  tint        = 0;
     float    exposure    = 0.0f;
     bool     highlightRecovery = false;
+    bool     gamutCompression = false;
+    uint32_t lensCorrections = 0; // 1=distortion, 2=shading, 4=chromatic aberration
     bool     previewLUT  = true;
+    uint32_t anamorphic=0,rotation=0,flips=0;
+    float customDesqueeze=2.0f;
+    bool toneCurveEnabled=false,videoBlack=false;
+    std::array<float,ToneValueCount> toneValues{};
 };
 
 struct ClipInfo {

@@ -55,6 +55,9 @@ bool     braw_clip_get_highlight_recovery(BrawClipHandle* h);
 void     braw_clip_set_highlight_recovery(BrawClipHandle* h, bool v);
 bool     braw_clip_get_preview_lut(BrawClipHandle* h);
 void     braw_clip_set_preview_lut(BrawClipHandle* h, bool v);
+bool braw_clip_has_embedded_lut(BrawClipHandle* h);
+const char* braw_clip_embedded_lut_name(BrawClipHandle* h);
+int braw_clip_save_embedded_lut(BrawClipHandle* h, const char* destination);
 
 void braw_clip_copy_adjustments(BrawClipHandle* src, BrawClipHandle* dst);
 
@@ -62,8 +65,35 @@ typedef struct {
     uint32_t iso, temperature;
     int16_t tint;
     float exposure;
-    bool highlightRecovery, previewLUT;
+    bool highlightRecovery, previewLUT, gamutCompression;
+    uint32_t lensCorrections;
+    uint32_t anamorphic,rotation,flips;
+    float customDesqueeze;
+    bool toneCurveEnabled,videoBlack;
+    float toneValues[7];
 } BrawClipSettings;
+// Anamorphic modes: 0=as shot, 1=off, 2=1.33x, 3=1.5x, 4=1.6x,
+// 5=1.66x, 6=1.8x, 7=2x, 8=custom. Rotation is clockwise quarter-turns; flips: 1=H, 2=V.
+void braw_clip_set_geometry(BrawClipHandle* h, uint32_t anamorphic, uint32_t rotation, uint32_t flips);
+// Finite ratios from 1 to 4 are accepted; invalid values leave settings unchanged.
+void braw_clip_set_custom_desqueeze(BrawClipHandle* h, float ratio);
+void braw_clip_get_render_dimensions(BrawClipHandle* h, int* width, int* height);
+typedef struct { float value, minimum, maximum; bool supported; } BrawToneRange;
+bool braw_clip_tone_curve_supported(BrawClipHandle* h);
+BrawToneRange braw_clip_get_tone_range(BrawClipHandle* h, int index);
+float braw_clip_get_tone_value(BrawClipHandle* h, int index);
+void braw_clip_set_tone_value(BrawClipHandle* h, int index, float value);
+void braw_clip_set_tone_enabled(BrawClipHandle* h, bool enabled);
+void braw_clip_set_video_black(BrawClipHandle* h, bool enabled);
+bool braw_clip_video_black_supported(BrawClipHandle* h);
+bool braw_clip_default_video_black(BrawClipHandle* h);
+
+// Lens correction masks: 1=distortion, 2=shading, 4=chromatic aberration.
+uint32_t braw_clip_get_lens_correction_support(BrawClipHandle* h);
+uint32_t braw_clip_get_lens_corrections(BrawClipHandle* h);
+void braw_clip_set_lens_corrections(BrawClipHandle* h, uint32_t enabled);
+bool braw_clip_get_gamut_compression(BrawClipHandle* h);
+void braw_clip_set_gamut_compression(BrawClipHandle* h, bool enabled);
 BrawClipSettings braw_clip_get_settings(BrawClipHandle* h);
 
 // Decode a single frame to BGRA8 CPU buffer with current adjustments applied.

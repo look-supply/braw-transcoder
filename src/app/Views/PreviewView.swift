@@ -10,7 +10,7 @@ struct PreviewView: View {
                     Text(clip.fileName)
                         .font(.system(size: 12, weight: .medium)).lineLimit(1)
                     Spacer()
-                    Text("\(clip.nativeWidth)×\(clip.nativeHeight)")
+                    Text("\(clip.renderDimensions.width)×\(clip.renderDimensions.height)")
                         .font(.system(size: 11)).foregroundColor(.secondary)
                     Text("·").foregroundColor(.secondary)
                     Text("\(String(format: "%.2f", clip.frameRate)) fps")
@@ -56,9 +56,7 @@ struct PreviewContent: View {
             ZStack {
                 Color.black.opacity(0.92)
                 
-                let aspect = clip.nativeHeight > 0
-                    ? CGFloat(clip.nativeWidth) / CGFloat(clip.nativeHeight)
-                    : 16.0 / 9.0
+                let aspect = clip.renderAspectRatio
                 
                 if let preview = clip.preview {
                     Image(nsImage: preview)

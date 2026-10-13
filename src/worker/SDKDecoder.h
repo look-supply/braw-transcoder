@@ -28,6 +28,12 @@ public:
     uint32_t GetNativeISO() const;
     std::vector<uint32_t> GetISOList() const;
     bool ISOIsReadOnly() const;
+    uint32_t GetLensCorrectionSupport() const;
+    GeometryInfo GetGeometryInfo() const;
+    ToneCurveInfo GetToneCurveInfo() const;
+    bool HasEmbeddedLUT() const;
+    std::string EmbeddedLUTName() const;
+    bool ReadEmbeddedLUTCube(std::vector<uint8_t>& bytes);
     uint32_t GetNativeColorTemp() const;
     int16_t GetNativeTint() const;
     float GetNativeExposure() const;

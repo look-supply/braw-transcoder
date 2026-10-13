@@ -3,12 +3,15 @@ import UniformTypeIdentifiers
 
 @main
 struct BrawTranscoderApp: App {
-    init() {}
+    init() {
+        NSWindow.allowsAutomaticWindowTabbing = false
+    }
     
     @StateObject private var project = ProjectModel()
+    @State private var isSavingEmbeddedLUT = false
     
     var body: some Scene {
-        WindowGroup {
+        Window("BRAW Transcoder", id: "main") {
             ContentView(project: project)
                 .frame(minWidth: 1200, minHeight: 700)
         }
@@ -19,6 +22,32 @@ struct BrawTranscoderApp: App {
                     openFilePicker()
                 }
                 .keyboardShortcut("o", modifiers: .command)
+                Button("Save Embedded LUT…") {
+                    saveEmbeddedLUT()
+                }
+                .disabled(project.selectedClip?.hasEmbeddedLUT != true || isSavingEmbeddedLUT || project.isExporting || project.isImporting)
+            }
+        }
+    }
+    func saveEmbeddedLUT() {
+        guard let clip = project.selectedClip, clip.hasEmbeddedLUT, !isSavingEmbeddedLUT else { return }
+        let panel = NSSavePanel()
+        panel.title = "Save Embedded LUT"
+        panel.allowedContentTypes = [UTType(filenameExtension: "cube") ?? .data]
+        panel.canCreateDirectories = true
+        let name = clip.embeddedLUTName.isEmpty ? clip.fileName : clip.embeddedLUTName
+        let stem = URL(fileURLWithPath: name).deletingPathExtension().lastPathComponent
+        panel.nameFieldStringValue = "\(stem).cube"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        isSavingEmbeddedLUT = true
+        Task { @MainActor in
+            defer { isSavingEmbeddedLUT = false }
+            if let error = await clip.saveEmbeddedLUT(to: destination) {
+                let alert = NSAlert()
+                alert.messageText = "Could Not Save Embedded LUT"
+                alert.informativeText = error
+                alert.alertStyle = .warning
+                alert.runModal()
             }
         }
     }

@@ -27,6 +27,12 @@ public:
 
     std::vector<uint32_t> GetISOList();
     bool ISOIsReadOnly() const;
+    uint32_t GetLensCorrectionSupport() const;
+    GeometryInfo GetGeometryInfo() const;
+    ToneCurveInfo GetToneCurveInfo() const;
+    bool HasEmbeddedLUT() const;
+    std::string EmbeddedLUTName() const;
+    bool SaveEmbeddedLUT(const std::string& path);
 
     // Decode a single frame synchronously. The callback receives CPU-side
     // BGRA8 pixel data. Blocks until the frame is decoded.

@@ -1,5 +1,6 @@
 #include "bridge/braw_api.h"
 #include "core/Types.h"
+#include "core/ImageGeometry.h"
 #include "core/BrawDecoder.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <string>
@@ -29,6 +30,10 @@ struct BrawClipHandle {
     uint32_t nativeISO = 0;
     std::vector<uint32_t> isoList;
     bool isoReadOnly=true;
+    uint32_t lensCorrectionSupport=0;
+    bool hasEmbeddedLUT=false;
+    std::string embeddedLUTName;
+    GeometryInfo geometryInfo;ToneCurveInfo toneInfo;
     uint32_t nativeColorTemp = 5600;
     int16_t  nativeTint = 0;
     float    nativeExposure = 0.0f;
@@ -100,6 +105,11 @@ BrawClipHandle* braw_clip_open(const char* path) {
         h->nativeISO        = h->decoder->GetNativeISO();
         h->isoList          = h->decoder->GetISOList();
         h->isoReadOnly      = h->decoder->ISOIsReadOnly();
+        h->lensCorrectionSupport = h->decoder->GetLensCorrectionSupport();
+        h->hasEmbeddedLUT=h->decoder->HasEmbeddedLUT();h->embeddedLUTName=h->decoder->EmbeddedLUTName();
+        h->adjustments.lensCorrections = 0;
+        h->geometryInfo=h->decoder->GetGeometryInfo();h->toneInfo=h->decoder->GetToneCurveInfo();
+        h->adjustments.toneValues=h->toneInfo.defaults;h->adjustments.videoBlack=h->toneInfo.videoBlack;
         h->nativeColorTemp  = h->decoder->GetNativeColorTemp();
         h->nativeTint       = h->decoder->GetNativeTint();
         h->nativeExposure   = h->decoder->GetNativeExposure();
@@ -132,7 +142,9 @@ const char* braw_clip_last_error(BrawClipHandle* h) {
 }
 BrawClipSettings braw_clip_get_settings(BrawClipHandle* h) {
     if(!h)return {}; std::lock_guard lock(h->settingsMutex);
-    auto a=h->adjustments;return {a.iso,a.colorTemp,a.tint,a.exposure,a.highlightRecovery,a.previewLUT};
+    auto a=h->adjustments;BrawClipSettings out{a.iso,a.colorTemp,a.tint,a.exposure,a.highlightRecovery,a.previewLUT,a.gamutCompression,a.lensCorrections,
+        a.anamorphic,a.rotation,a.flips,a.customDesqueeze,a.toneCurveEnabled,a.videoBlack,{}};
+    std::copy(a.toneValues.begin(),a.toneValues.end(),out.toneValues);return out;
 }
 
 void braw_clip_capture_native(BrawClipHandle* h) {
@@ -197,9 +209,29 @@ void braw_clip_set_exposure(BrawClipHandle* h, float v)     { if (h) {std::lock_
 bool braw_clip_get_highlight_recovery(BrawClipHandle* h)     { if(!h)return false; std::lock_guard lock(h->settingsMutex); return h->adjustments.highlightRecovery; }
 void braw_clip_set_highlight_recovery(BrawClipHandle* h, bool v) { if (h) {std::lock_guard lock(h->settingsMutex); h->adjustments.highlightRecovery = v;} }
 bool braw_clip_get_preview_lut(BrawClipHandle* h)            { if(!h)return false; std::lock_guard lock(h->settingsMutex); return h->adjustments.previewLUT; }
+bool braw_clip_has_embedded_lut(BrawClipHandle* h){return h&&h->hasEmbeddedLUT;}
+const char* braw_clip_embedded_lut_name(BrawClipHandle* h){return h?h->embeddedLUTName.c_str():"";}
+int braw_clip_save_embedded_lut(BrawClipHandle* h,const char* destination) {
+    if(!h||!destination)return -1;
+    std::lock_guard lock(h->decoderMutex);
+    if(!h->hasEmbeddedLUT){h->lastError="This clip does not contain an embedded LUT.";return -1;}
+    struct stat source{},output{};
+    if(stat(h->filePath.c_str(),&source)==0&&stat(destination,&output)==0&&source.st_dev==output.st_dev&&source.st_ino==output.st_ino) {
+        h->lastError="Choose a destination other than the source clip.";return -1;
+    }
+    ensureDecoder(h);
+    if(!h->decoderOpen||!h->decoder->SaveEmbeddedLUT(destination)) {
+        h->lastError=h->decoder->LastError();return -1;
+    }
+    h->lastError.clear();return 0;
+}
 void braw_clip_set_preview_lut(BrawClipHandle* h, bool v)   { if (h) {std::lock_guard lock(h->settingsMutex); h->adjustments.previewLUT = v;} }
 void braw_clip_copy_adjustments(BrawClipHandle* src, BrawClipHandle* dst) {
     if(src&&dst&&src!=dst){std::scoped_lock lock(src->settingsMutex,dst->settingsMutex);dst->adjustments=src->adjustments;
+        dst->adjustments.lensCorrections &= dst->lensCorrectionSupport;
+        if(!dst->toneInfo.supported||!src->toneInfo.supported){dst->adjustments.toneCurveEnabled=false;dst->adjustments.toneValues=dst->toneInfo.defaults;}
+        else for(size_t i=0;i<ToneValueCount;i++)dst->adjustments.toneValues[i]=std::clamp(dst->adjustments.toneValues[i],dst->toneInfo.minimum[i],dst->toneInfo.maximum[i]);
+        if(!dst->toneInfo.videoBlackSupported||!src->toneInfo.supported)dst->adjustments.videoBlack=dst->toneInfo.videoBlack;
         if(dst->isoReadOnly||std::find(dst->isoList.begin(),dst->isoList.end(),dst->adjustments.iso)==dst->isoList.end())dst->adjustments.iso=dst->nativeISO;
     }
 }
@@ -401,3 +433,59 @@ int braw_export_dimensions(int mode, int nativeWidth, int nativeHeight, int* wid
     if (!width || !height) return 0;
     return CalculateExportDimensions(mode, nativeWidth, nativeHeight, *width, *height) ? 1 : 0;
 }
+
+bool braw_clip_get_gamut_compression(BrawClipHandle* h) {
+    if(!h)return false;std::lock_guard lock(h->settingsMutex);return h->adjustments.gamutCompression;
+}
+void braw_clip_set_gamut_compression(BrawClipHandle* h,bool enabled) {
+    if(h){std::lock_guard lock(h->settingsMutex);h->adjustments.gamutCompression=enabled;}
+}
+
+uint32_t braw_clip_get_lens_correction_support(BrawClipHandle* h) {
+    return h?h->lensCorrectionSupport:0;
+}
+uint32_t braw_clip_get_lens_corrections(BrawClipHandle* h) {
+    if(!h)return 0;std::lock_guard lock(h->settingsMutex);return h->adjustments.lensCorrections;
+}
+void braw_clip_set_lens_corrections(BrawClipHandle* h,uint32_t enabled) {
+    if(h){std::lock_guard lock(h->settingsMutex);h->adjustments.lensCorrections=enabled & h->lensCorrectionSupport;}
+}
+
+void braw_clip_set_geometry(BrawClipHandle* h,uint32_t anamorphic,uint32_t rotation,uint32_t flips) {
+    if(!h||anamorphic>CustomAnamorphicMode||rotation>3||flips>3)return;
+    std::lock_guard lock(h->settingsMutex);h->adjustments.anamorphic=anamorphic;h->adjustments.rotation=rotation;h->adjustments.flips=flips;
+}
+void braw_clip_set_custom_desqueeze(BrawClipHandle* h,float ratio) {
+    if(!h||!ValidCustomDesqueeze(ratio))return;
+    std::lock_guard lock(h->settingsMutex);h->adjustments.customDesqueeze=ratio;
+}
+void braw_clip_get_render_dimensions(BrawClipHandle* h,int* width,int* height) {
+    if(!width||!height)return;*width=*height=0;if(!h)return;
+    std::lock_guard lock(h->settingsMutex);
+    const auto mode=h->adjustments.anamorphic==CustomAnamorphicMode?1:h->adjustments.anamorphic;
+    const auto size=h->geometryInfo.dimensions[mode];
+    *width=size[0];*height=size[1];
+    if(h->adjustments.anamorphic==CustomAnamorphicMode)*height=CustomDesqueezeHeight(*height,h->adjustments.customDesqueeze);
+    if(h->adjustments.rotation&1)std::swap(*width,*height);
+}
+bool braw_clip_tone_curve_supported(BrawClipHandle* h){return h&&h->toneInfo.supported;}
+BrawToneRange braw_clip_get_tone_range(BrawClipHandle* h,int index) {
+    if(!h||index<0||index>=int(ToneValueCount))return {};
+    return {h->toneInfo.defaults[index],h->toneInfo.minimum[index],h->toneInfo.maximum[index],h->toneInfo.supported};
+}
+float braw_clip_get_tone_value(BrawClipHandle* h,int index) {
+    if(!h||index<0||index>=int(ToneValueCount))return 0;
+    std::lock_guard lock(h->settingsMutex);return h->adjustments.toneValues[index];
+}
+void braw_clip_set_tone_value(BrawClipHandle* h,int index,float value) {
+    if(!h||index<0||index>=int(ToneValueCount)||!h->toneInfo.supported||!std::isfinite(value))return;
+    std::lock_guard lock(h->settingsMutex);h->adjustments.toneValues[index]=std::clamp(value,h->toneInfo.minimum[index],h->toneInfo.maximum[index]);
+}
+void braw_clip_set_tone_enabled(BrawClipHandle* h,bool enabled) {
+    if(h){std::lock_guard lock(h->settingsMutex);h->adjustments.toneCurveEnabled=enabled&&h->toneInfo.supported;}
+}
+void braw_clip_set_video_black(BrawClipHandle* h,bool enabled) {
+    if(h){std::lock_guard lock(h->settingsMutex);h->adjustments.videoBlack=h->toneInfo.videoBlackSupported?enabled:h->toneInfo.videoBlack;}
+}
+bool braw_clip_video_black_supported(BrawClipHandle* h){return h&&h->toneInfo.videoBlackSupported;}
+bool braw_clip_default_video_black(BrawClipHandle* h){return h&&h->toneInfo.videoBlack;}

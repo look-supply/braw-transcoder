@@ -59,6 +59,17 @@ private final class NativeClip: @unchecked Sendable {
     func releaseDecoder() {
         queue.async { [self] in braw_clip_release_decoder(handle) }
     }
+    func saveEmbeddedLUT(to path: String) async -> String? {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                if braw_clip_save_embedded_lut(handle, path) == 0 {
+                    continuation.resume(returning: nil)
+                } else {
+                    continuation.resume(returning: String(cString: braw_clip_last_error(handle)))
+                }
+            }
+        }
+    }
 }
 private final class NativeProject: @unchecked Sendable {
     let handle: OpaquePointer
@@ -105,6 +116,69 @@ final class ClipModel: Identifiable, ObservableObject {
     @Published var highlightRecovery = false {
         didSet { if let h = handle { braw_clip_set_highlight_recovery(h, highlightRecovery) }; schedulePreviewRefresh() }
     }
+    @Published var gamutCompression = false {
+        didSet { if let h = handle { braw_clip_set_gamut_compression(h, gamutCompression) }; schedulePreviewRefresh() }
+    }
+    private(set) var lensCorrectionSupport: UInt32 = 0
+    @Published var lensCorrections: UInt32 = 0 {
+        didSet {
+            if let h = handle {
+                braw_clip_set_lens_corrections(h, lensCorrections)
+                let applied = braw_clip_get_lens_corrections(h)
+                if applied != lensCorrections { lensCorrections = applied }
+            }
+            schedulePreviewRefresh()
+        }
+    }
+    @Published var anamorphicMode = 0 { didSet { applyGeometry(); schedulePreviewRefresh() } }
+    @Published var customDesqueeze: Float = 2 {
+        didSet {
+            if let h = handle {
+                braw_clip_set_custom_desqueeze(h, customDesqueeze)
+                let applied = braw_clip_get_settings(h).customDesqueeze
+                if applied != customDesqueeze { customDesqueeze = applied }
+            }
+            schedulePreviewRefresh()
+        }
+    }
+    @Published var rotation = 0 { didSet { applyGeometry(); schedulePreviewRefresh() } }
+    @Published var flipHorizontal = false { didSet { applyGeometry(); schedulePreviewRefresh() } }
+    @Published var flipVertical = false { didSet { applyGeometry(); schedulePreviewRefresh() } }
+    private(set) var toneCurveSupported = false
+    private(set) var videoBlackSupported = false
+    private(set) var toneRanges: [BrawToneRange] = []
+    private(set) var toneDefaults: [Float] = []
+    private(set) var defaultVideoBlack = false
+    @Published var toneCurveEnabled = false {
+        didSet {
+            if let h = handle {
+                braw_clip_set_tone_enabled(h, toneCurveEnabled)
+                let applied = braw_clip_get_settings(h).toneCurveEnabled
+                if toneCurveEnabled != applied { toneCurveEnabled = applied }
+            }
+            schedulePreviewRefresh()
+        }
+    }
+    @Published var toneValues: [Float] = Array(repeating: 0, count: 7) {
+        didSet {
+            if let h = handle, toneValues.count == 7 {
+                for index in 0..<7 { braw_clip_set_tone_value(h, Int32(index), toneValues[index]) }
+                let applied = (0..<7).map { braw_clip_get_tone_value(h, Int32($0)) }
+                if applied != toneValues { toneValues = applied }
+            }
+            schedulePreviewRefresh()
+        }
+    }
+    @Published var videoBlack = false {
+        didSet {
+            if let h = handle {
+                braw_clip_set_video_black(h, videoBlack)
+                let applied = braw_clip_get_settings(h).videoBlack
+                if videoBlack != applied { videoBlack = applied }
+            }
+            schedulePreviewRefresh()
+        }
+    }
     @Published var previewLUT = true {
         didSet { if let h = handle { braw_clip_set_preview_lut(h, previewLUT) }; schedulePreviewRefresh() }
     }
@@ -126,6 +200,11 @@ final class ClipModel: Identifiable, ObservableObject {
 
     private var _fileName: String = ""
     var fileName: String { _fileName }
+    private(set) var hasEmbeddedLUT = false
+    private(set) var embeddedLUTName = ""
+    func saveEmbeddedLUT(to url: URL) async -> String? {
+        await native.saveEmbeddedLUT(to: url.path)
+    }
 
     private var _dirPath: String = ""
     var directoryPath: String { _dirPath }
@@ -172,6 +251,8 @@ final class ClipModel: Identifiable, ObservableObject {
         self.native = NativeClip(retainedHandle: handle)
         if let h = self.handle {
             _fileName = String(cString: braw_clip_get_filename(h))
+            hasEmbeddedLUT = braw_clip_has_embedded_lut(h)
+            embeddedLUTName = String(cString: braw_clip_embedded_lut_name(h))
             let fullPath = String(cString: braw_clip_get_filepath(h))
             _filePath = fullPath
             if let lastSlash = fullPath.lastIndex(of: "/") {
@@ -182,11 +263,28 @@ final class ClipModel: Identifiable, ObservableObject {
             colorScienceGen = braw_clip_get_color_science_gen(h)
             isoPresets = (0..<Int(braw_clip_get_iso_count(h))).map { braw_clip_get_iso_at(h, Int32($0)) }
             isoReadOnly = braw_clip_iso_is_read_only(h) != 0
+            lensCorrectionSupport = braw_clip_get_lens_correction_support(h)
+            let processing = braw_clip_get_settings(h)
+            toneCurveSupported = braw_clip_tone_curve_supported(h)
+            videoBlackSupported = braw_clip_video_black_supported(h)
+            defaultVideoBlack = braw_clip_default_video_black(h)
+            toneRanges = (0..<7).map { braw_clip_get_tone_range(h, Int32($0)) }
+            toneDefaults = toneRanges.map { $0.value }
+            toneValues = (0..<7).map { braw_clip_get_tone_value(h, Int32($0)) }
+            toneCurveEnabled = processing.toneCurveEnabled
+            videoBlack = processing.videoBlack
+            customDesqueeze = processing.customDesqueeze
+            anamorphicMode = Int(processing.anamorphic)
+            rotation = Int(processing.rotation)
+            flipHorizontal = processing.flips & 1 != 0
+            flipVertical = processing.flips & 2 != 0
             iso = braw_clip_get_iso(h)
             colorTemp = braw_clip_get_color_temp(h)
             tint = braw_clip_get_tint(h)
             exposure = braw_clip_get_exposure(h)
             highlightRecovery = braw_clip_get_highlight_recovery(h)
+            gamutCompression = braw_clip_get_gamut_compression(h)
+            lensCorrections = braw_clip_get_lens_corrections(h)
             previewLUT = braw_clip_get_preview_lut(h)
             // Read native camera metadata
             nativeISO = braw_clip_get_native_iso(h)
@@ -230,6 +328,32 @@ final class ClipModel: Identifiable, ObservableObject {
         isLoadingPreview = false
     }
     
+    var renderDimensions: (width: Int32, height: Int32) {
+        var width: Int32 = 0, height: Int32 = 0
+        if let h = handle { braw_clip_get_render_dimensions(h, &width, &height) }
+        return (width, height)
+    }
+    var renderAspectRatio: CGFloat {
+        let size = renderDimensions
+        return size.height > 0 ? CGFloat(size.width) / CGFloat(size.height) : 16.0 / 9.0
+    }
+    var renderedGamma: String { toneCurveEnabled ? "Blackmagic Design Custom" : gamma }
+    func applyGeometry() {
+        if let h = handle {
+            braw_clip_set_custom_desqueeze(h, customDesqueeze)
+            braw_clip_set_geometry(h, UInt32(clamping: anamorphicMode), UInt32(clamping: rotation),
+                                   (flipHorizontal ? 1 : 0) | (flipVertical ? 2 : 0))
+        }
+    }
+    func refreshProcessing() {
+        guard let h = handle else { return }
+        let settings = braw_clip_get_settings(h)
+        customDesqueeze = settings.customDesqueeze
+        anamorphicMode = Int(settings.anamorphic); rotation = Int(settings.rotation)
+        flipHorizontal = settings.flips & 1 != 0; flipVertical = settings.flips & 2 != 0
+        toneValues = (0..<7).map { braw_clip_get_tone_value(h, Int32($0)) }
+        toneCurveEnabled = settings.toneCurveEnabled; videoBlack = settings.videoBlack
+    }
     func applyToEngine() {
         guard let h = handle else { return }
         braw_clip_set_iso(h, iso)
@@ -237,7 +361,13 @@ final class ClipModel: Identifiable, ObservableObject {
         braw_clip_set_tint(h, tint)
         braw_clip_set_exposure(h, exposure)
         braw_clip_set_highlight_recovery(h, highlightRecovery)
+        braw_clip_set_gamut_compression(h, gamutCompression)
+        braw_clip_set_lens_corrections(h, lensCorrections)
         braw_clip_set_preview_lut(h, previewLUT)
+        applyGeometry()
+        braw_clip_set_tone_enabled(h, toneCurveEnabled)
+        braw_clip_set_video_black(h, videoBlack)
+        for index in 0..<toneValues.count { braw_clip_set_tone_value(h, Int32(index), toneValues[index]) }
     }
 
     func loadThumbnail(force: Bool = false) {
@@ -266,7 +396,10 @@ final class ClipModel: Identifiable, ObservableObject {
         tint = braw_clip_get_tint(h)
         exposure = braw_clip_get_exposure(h)
         highlightRecovery = braw_clip_get_highlight_recovery(h)
+        gamutCompression = braw_clip_get_gamut_compression(h)
+        lensCorrections = braw_clip_get_lens_corrections(h)
         previewLUT = braw_clip_get_preview_lut(h)
+        refreshProcessing()
         synchronizePresetLabels()
     }
 
@@ -312,6 +445,10 @@ final class ClipModel: Identifiable, ObservableObject {
         isoPresetIndex = 0
         exposure = 0
         highlightRecovery = false
+        gamutCompression = false
+        lensCorrections = 0
+        anamorphicMode = 0; customDesqueeze = 2; rotation = 0; flipHorizontal = false; flipVertical = false
+        toneCurveEnabled = false; toneValues = toneDefaults; videoBlack = defaultVideoBlack
         previewLUT = true
         colorTemp = nativeColorTemp
         tint = nativeTint
@@ -374,6 +511,17 @@ struct StoredAdjustments {
     var tint: Int16
     var exposure: Float
     var highlightRecovery: Bool
+    var gamutCompression: Bool
+    var lensCorrections: UInt32
+    var anamorphicMode: Int
+    var customDesqueeze: Float
+    var rotation: Int
+    var flipHorizontal: Bool
+    var flipVertical: Bool
+    var toneCurveSupported: Bool
+    var toneCurveEnabled: Bool
+    var toneValues: [Float]
+    var videoBlack: Bool
     var previewLUT: Bool
     var isoPresetIndex: Int
     var colorPresetIndex: Int
@@ -473,6 +621,11 @@ final class ProjectModel: ObservableObject {
             tint: clip.tint,
             exposure: clip.exposure,
             highlightRecovery: clip.highlightRecovery,
+            gamutCompression: clip.gamutCompression,
+            lensCorrections: clip.lensCorrections,
+            anamorphicMode: clip.anamorphicMode, customDesqueeze: clip.customDesqueeze, rotation: clip.rotation,
+            flipHorizontal: clip.flipHorizontal, flipVertical: clip.flipVertical,
+            toneCurveSupported: clip.toneCurveSupported, toneCurveEnabled: clip.toneCurveEnabled, toneValues: clip.toneValues, videoBlack: clip.videoBlack,
             previewLUT: clip.previewLUT,
             isoPresetIndex: clip.isoPresetIndex,
             colorPresetIndex: clip.colorPresetIndex
@@ -488,6 +641,13 @@ final class ProjectModel: ObservableObject {
         clip.tint = settings.tint
         clip.exposure = settings.exposure
         clip.highlightRecovery = settings.highlightRecovery
+        clip.gamutCompression = settings.gamutCompression
+        clip.lensCorrections = settings.lensCorrections
+        clip.customDesqueeze = settings.customDesqueeze
+        clip.anamorphicMode = settings.anamorphicMode; clip.rotation = settings.rotation
+        clip.flipHorizontal = settings.flipHorizontal; clip.flipVertical = settings.flipVertical
+        clip.toneValues = settings.toneCurveSupported ? settings.toneValues : clip.toneDefaults; clip.videoBlack = settings.toneCurveSupported ? settings.videoBlack : clip.defaultVideoBlack
+        clip.toneCurveEnabled = settings.toneCurveEnabled
         clip.previewLUT = settings.previewLUT
         clip.synchronizePresetLabels()
     }

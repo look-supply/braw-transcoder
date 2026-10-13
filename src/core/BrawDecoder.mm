@@ -10,6 +10,10 @@ struct BrawDecoder::Impl {
     uint32_t width=0,height=0,iso=0,temperature=0;
     std::vector<uint32_t> isoList;
     bool isoReadOnly=true;
+    bool hasEmbeddedLUT=false;
+    std::string embeddedLUTName;
+    uint32_t lensCorrectionSupport=0;
+    GeometryInfo geometryInfo;ToneCurveInfo toneInfo;
     uint64_t frames=0;
     float fps=0,exposure=0;
     int16_t tint=0;
@@ -25,7 +29,7 @@ struct BrawDecoder::Impl {
         if(response.magicValue!=magic||response.size>maxPayload||response.status!=0) {
             const std::string operation=request.command==Open?"opening source clip "+path+" on "+(request.metal?"Metal":"CPU"):
                 request.command==Frame?"decoding frame "+std::to_string(request.index):
-                "reading audio at sample "+std::to_string(request.index);
+                request.command==EmbeddedLUT?"extracting embedded LUT":"reading audio at sample "+std::to_string(request.index);
             if(response.magicValue!=magic)error="Invalid decoder response while "+operation+" (protocol mismatch).";
             else if(response.size>maxPayload)error="Decoder response exceeded the "+std::to_string(maxPayload/1048576)+" MiB frame limit while "+operation+".";
             else error="Blackmagic RAW SDK failed while "+operation+" (worker status "+std::to_string(response.status)+").";
@@ -53,6 +57,19 @@ struct BrawDecoder::Impl {
         isoReadOnly=info[@"isoReadOnly"]?[info[@"isoReadOnly"] boolValue]:true;
         if(isoList.empty()){isoList={iso};isoReadOnly=true;}
         tint=[info[@"tint"] shortValue];exposure=[info[@"exposure"] floatValue];
+        geometryInfo={};toneInfo={};
+        NSArray* geometry=info[@"geometry"];
+        if(geometry.count!=8){error="Invalid geometry capabilities";return false;}
+        for(size_t i=0;i<8;i++){geometryInfo.dimensions[i][0]=[geometry[i][0] unsignedIntValue];geometryInfo.dimensions[i][1]=[geometry[i][1] unsignedIntValue];}
+        toneInfo.supported=[info[@"toneSupported"] boolValue];toneInfo.videoBlack=[info[@"videoBlack"] boolValue];
+        toneInfo.videoBlackSupported=[info[@"videoBlackSupported"] boolValue];
+        for(size_t i=0;i<ToneValueCount;i++) {
+            toneInfo.defaults[i]=[info[@"toneDefaults"][i] floatValue];
+            toneInfo.minimum[i]=[info[@"toneMinimum"][i] floatValue];toneInfo.maximum[i]=[info[@"toneMaximum"][i] floatValue];
+        }
+        lensCorrectionSupport=[info[@"lensCorrectionSupport"] unsignedIntValue];
+        hasEmbeddedLUT=[info[@"hasEmbeddedLUT"] boolValue];
+        embeddedLUTName=[info[@"embeddedLUTName"] UTF8String]?:"";
         generation=[info[@"generation"] unsignedShortValue];
         version=[info[@"sdk"] UTF8String]?:"";camera=[info[@"camera"] UTF8String]?:"";
         gamma=[info[@"gamma"] UTF8String]?:"";gamut=[info[@"gamut"] UTF8String]?:"";
@@ -85,8 +102,25 @@ GET(int16_t,GetNativeTint,tint) GET(float,GetNativeExposure,exposure)
 GET(std::string,GetClipGamma,gamma) GET(std::string,GetClipGamut,gamut)
 GET(uint16_t,GetColorScienceGen,generation) GET(std::string,LastError,error)
 GET(std::string,SDKVersion,version) GET(bool,UsingMetal,metal)
-GET(bool,ISOIsReadOnly,isoReadOnly)
+GET(bool,ISOIsReadOnly,isoReadOnly) GET(uint32_t,GetLensCorrectionSupport,lensCorrectionSupport)
 #undef GET
+GeometryInfo BrawDecoder::GetGeometryInfo() const{return m_impl->geometryInfo;}
+ToneCurveInfo BrawDecoder::GetToneCurveInfo() const{return m_impl->toneInfo;}
+bool BrawDecoder::HasEmbeddedLUT() const{return m_impl->hasEmbeddedLUT;}
+std::string BrawDecoder::EmbeddedLUTName() const{return m_impl->embeddedLUTName;}
+bool BrawDecoder::SaveEmbeddedLUT(const std::string& path) {
+    auto& p=*m_impl;
+    if(!p.hasEmbeddedLUT){p.error="This clip does not contain an embedded LUT.";return false;}
+    Request request;request.command=EmbeddedLUT;Response response;std::vector<uint8_t> bytes;
+    if(!p.Exchange(request,{},response,bytes))return false;
+    NSString* destination=[NSString stringWithUTF8String:path.c_str()];
+    NSError* error=nil;
+    NSData* data=[NSData dataWithBytes:bytes.data() length:bytes.size()];
+    if(!destination||![data writeToFile:destination options:NSDataWritingAtomic error:&error]) {
+        p.error=error.localizedDescription.UTF8String?:"Could not save embedded LUT.";return false;
+    }
+    p.error.clear();return true;
+}
 std::map<std::string,std::string> BrawDecoder::GetFreeFormMetadata() const{return m_impl->metadata;}
 std::vector<uint32_t> BrawDecoder::GetISOList(){return m_impl->isoList;}
 void BrawDecoder::SetOutputFormat(int format){m_impl->format=format;}
@@ -100,9 +134,16 @@ void BrawDecoder::RequestFrame(uint64_t index,const ClipAdjustments& a,FrameCall
     if(a.iso&&((p.isoReadOnly&&a.iso!=p.iso)||std::find(p.isoList.begin(),p.isoList.end(),a.iso)==p.isoList.end())) {
         p.error="ISO "+std::to_string(a.iso)+" is not supported by this clip's recorded analog gain. Use a listed ISO or adjust Exposure.";return;
     }
+    if(a.lensCorrections & ~p.lensCorrectionSupport) {
+        p.error="Requested lens correction is unavailable for this clip.";return;
+    }
     Request request;request.command=Frame;request.index=index;request.iso=a.iso;
     request.temperature=a.colorTemp;request.tint=a.tint;request.exposure=a.exposure;
-    request.scale=scale;request.highlight=a.highlightRecovery;request.lut=a.previewLUT;
+    request.scale=scale;request.highlight=a.highlightRecovery;request.lut=a.previewLUT;request.gamutCompression=a.gamutCompression;request.lensCorrections=a.lensCorrections;
+    request.anamorphic=a.anamorphic;request.rotation=a.rotation;request.flips=a.flips;
+    request.customDesqueeze=a.customDesqueeze;
+    request.toneEnabled=a.toneCurveEnabled;request.videoBlack=a.videoBlack;
+    std::copy(a.toneValues.begin(),a.toneValues.end(),request.toneValues);
     Response response;std::vector<uint8_t> pixels;
     bool ok=p.Exchange(request,{},response,pixels);
     if(!ok&&p.metal&&!(p.cancel&&p.cancel->load())) {

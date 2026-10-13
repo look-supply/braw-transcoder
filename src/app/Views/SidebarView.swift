@@ -3,7 +3,8 @@ import UniformTypeIdentifiers
 
 struct SidebarView: View {
     @ObservedObject var project: ProjectModel
-    @State private var keyMonitor: Any?
+    // Disabled with the clip-removal keyboard monitor below.
+    // @State private var keyMonitor: Any?
     @State private var isDropTargeted = false
     
     var body: some View {
@@ -112,6 +113,9 @@ struct SidebarView: View {
                     .allowsHitTesting(false)
             }
         }
+        // Keep Backspace/Delete available for editing Inspector text fields.
+        // Clip removal uses the trash button or context menu until revisited.
+        /*
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 if event.keyCode == 51 || event.keyCode == 117 {
@@ -126,6 +130,7 @@ struct SidebarView: View {
                 NSEvent.removeMonitor(monitor)
             }
         }
+        */
     }
     
     func importFiles() {
@@ -202,8 +207,7 @@ struct ClipRowView: View {
     let isSelected: Bool
 
     private var thumbnailAspectRatio: CGFloat {
-        guard clip.nativeWidth > 0, clip.nativeHeight > 0 else { return 16.0 / 9.0 }
-        return CGFloat(clip.nativeWidth) / CGFloat(clip.nativeHeight)
+        clip.renderAspectRatio
     }
     
     var body: some View {

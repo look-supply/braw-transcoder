@@ -62,6 +62,7 @@ add_executable(${PROJECT_NAME}
     src/app/Views/SidebarView.swift
     src/app/Views/PreviewView.swift
     src/app/Views/InspectorView.swift
+    src/app/Views/NumericSlider.swift
     src/app/Views/RGBWaveformView.swift
     src/app/Views/ExportView.swift
     src/app/Info.plist
@@ -144,7 +145,19 @@ target_compile_options(braw_model_test PRIVATE
     "SHELL:-import-objc-header ${CMAKE_SOURCE_DIR}/src/bridge/braw_api.h")
 target_link_libraries(braw_model_test PRIVATE braw_core "-framework AppKit" "-framework CoreFoundation")
 add_dependencies(braw_model_test braw_worker)
+add_executable(braw_numeric_slider_test test/numeric_slider.swift src/app/Views/NumericSlider.swift)
+target_link_libraries(braw_numeric_slider_test PRIVATE "-framework AppKit" "-framework SwiftUI")
+add_test(NAME numeric_slider COMMAND braw_numeric_slider_test)
+set_tests_properties(numeric_slider PROPERTIES TIMEOUT 20)
 if(EXISTS "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    add_test(NAME embedded_lut COMMAND braw_reliability_test --embedded-lut "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    set_tests_properties(embedded_lut PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 60)
+    add_test(NAME geometry_tone COMMAND braw_reliability_test --geometry-tone "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    set_tests_properties(geometry_tone PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 120)
+    add_test(NAME lens_corrections COMMAND braw_reliability_test --lens "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    set_tests_properties(lens_corrections PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 120)
+    add_test(NAME gamut_compression COMMAND braw_reliability_test --gamut "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    set_tests_properties(gamut_compression PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 120)
     add_test(NAME multichannel_audio COMMAND braw_reliability_test --multichannel-audio "${BRAW_SDK_ROOT}/../Media/sample.braw")
     set_tests_properties(multichannel_audio PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 120)
     add_test(NAME export_resolutions COMMAND braw_reliability_test --resolution-export "${BRAW_SDK_ROOT}/../Media/sample.braw")

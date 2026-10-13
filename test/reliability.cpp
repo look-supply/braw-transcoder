@@ -3,12 +3,16 @@
 #include "core/ChildProcess.h"
 #include "core/ExportEncoderError.h"
 #include "core/ExportAudio.h"
+#include "core/ImageGeometry.h"
+#include "core/ImageDesqueeze.h"
+#include "worker/SDKDecoder.h"
 #include "worker/Protocol.h"
 #include <Accelerate/Accelerate.h>
 #include <chrono>
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <thread>
 #include <stdexcept>
 #include <cstdio>
@@ -333,12 +337,219 @@ static void multichannelAudio(const char* sample) {
     }
     braw_project_destroy(project);
 }
+static void gamutCompression(const char* sample) {
+    BrawDecoder decoder;require(decoder.OpenClip(sample),decoder.LastError());
+    ClipAdjustments a;a.iso=decoder.GetNativeISO();a.colorTemp=decoder.GetNativeColorTemp();a.tint=decoder.GetNativeTint();a.previewLUT=false;
+    int w=0,h=0,stride=0;
+    for (int format : {0,1}) {
+        decoder.Close();decoder.SetOutputFormat(format);require(decoder.OpenClip(sample),decoder.LastError());
+        a.gamutCompression=false;
+        auto off=decoder.DecodeFrameSync(0,&w,&h,&stride,a,.125f);require(!off.empty(),decoder.LastError());
+        a.gamutCompression=true;
+        auto on=decoder.DecodeFrameSync(0,&w,&h,&stride,a,.125f);require(!on.empty(),decoder.LastError());
+        a.gamutCompression=false;
+        auto restored=decoder.DecodeFrameSync(0,&w,&h,&stride,a,.125f);
+        require(restored==off,"Disabling gamut compression did not restore decoded pixels");
+        printf("PASS: %s gamut compression off/on/off; pixels changed=%d\n",format?"RGB16":"BGRA8",off!=on);
+    }
+    const bool singleFrame=decoder.GetFrameCount()==1;decoder.Close();
+    auto* project=braw_project_create();require(braw_project_import(project,sample)==0,"Gamut fixture import failed");
+    auto* clip=braw_project_get_clip(project,0);require(!braw_clip_get_gamut_compression(clip),"Gamut compression default is on");
+    if(singleFrame) {
+        Directory dir;
+        for (bool enabled : {false,true}) {
+            braw_clip_set_gamut_compression(clip,enabled);
+            require(braw_clip_get_settings(clip).gamutCompression==enabled,"Export settings ignored gamut compression");
+            auto folder=fs::path(dir.path)/(enabled?"on":"off");fs::create_directory(folder);int index=0;
+            require(braw_export_start(project,&index,1,2,0,3,100,folder.c_str(),nullptr,nullptr)==0,braw_export_last_error());
+            puts(enabled?"PASS: gamut-compressed MOV exported":"PASS: gamut compression disabled MOV exported");
+        }
+    }
+    braw_project_destroy(project);
+}
+static void lensCorrections(const char* sample,float scale=.125f) {
+    BrawDecoder decoder;require(decoder.OpenClip(sample),decoder.LastError());
+    const uint32_t support=decoder.GetLensCorrectionSupport();require((support&~7u)==0,"Invalid lens capability mask");
+    auto* project=braw_project_create();require(braw_project_import(project,sample)==0,"Lens fixture import failed");
+    auto* clip=braw_project_get_clip(project,0);
+    require(braw_clip_get_lens_correction_support(clip)==support,"Bridge lost lens capabilities");
+    require(braw_clip_get_lens_corrections(clip)==0,"Lens corrections are enabled by default");
+    braw_clip_set_lens_corrections(clip,UINT32_MAX);
+    require(braw_clip_get_settings(clip).lensCorrections==support,"Unsupported correction was retained");
+    ClipAdjustments settings;settings.iso=decoder.GetNativeISO();settings.colorTemp=decoder.GetNativeColorTemp();
+    settings.tint=decoder.GetNativeTint();settings.previewLUT=false;int w=0,h=0,stride=0;
+    for(int format : {0,1}) {
+        decoder.Close();decoder.SetOutputFormat(format);require(decoder.OpenClip(sample),decoder.LastError());
+        settings.lensCorrections=0;
+        auto original=decoder.DecodeFrameSync(0,&w,&h,&stride,settings,scale);require(!original.empty(),decoder.LastError());
+        for(uint32_t flag : {1u,2u,4u}) {
+            settings.lensCorrections=flag;
+            auto corrected=decoder.DecodeFrameSync(0,&w,&h,&stride,settings,scale);
+            if(support&flag) {
+                require(!corrected.empty(),decoder.LastError());
+                printf("PASS: lens correction %u decoded; pixels changed=%d\n",flag,corrected!=original);
+            } else require(corrected.empty()&&decoder.LastError().find("unavailable")!=std::string::npos,"Unsupported correction decoded silently");
+        }
+        settings.lensCorrections=support;
+        require(!decoder.DecodeFrameSync(0,&w,&h,&stride,settings,scale).empty(),decoder.LastError());
+        settings.lensCorrections=0;
+        require(decoder.DecodeFrameSync(0,&w,&h,&stride,settings,scale)==original,"Turning lens correction off did not restore pixels");
+    }
+    const bool singleFrame=decoder.GetFrameCount()==1;decoder.Close();
+    braw_clip_set_lens_corrections(clip,0);require(braw_clip_get_settings(clip).lensCorrections==0,"Could not disable corrections");
+    braw_clip_set_lens_corrections(clip,support);
+    if(singleFrame) {
+        Directory dir;int index=0;
+        require(braw_export_start(project,&index,1,2,0,3,100,dir.path.c_str(),nullptr,nullptr)==0,braw_export_last_error());
+    }
+    braw_project_destroy(project);
+    printf("PASS: lens defaults, capabilities, normalization, preview/export decoding, reset; support mask %u\n",support);
+}
+static void embeddedLUT(const char* sample) {
+    Directory dir;
+    auto* clip=braw_clip_open(sample);require(clip&&braw_clip_get_width(clip)>0,"LUT fixture import failed");
+    auto output=fs::path(dir.path)/"embedded.cube";
+    if(!braw_clip_has_embedded_lut(clip)) {
+        require(braw_clip_save_embedded_lut(clip,output.c_str())!=0,"Absent LUT was reported as saved");
+        require(!fs::exists(output),"Absent LUT created a file");
+        braw_clip_close(clip);printf("PASS: clip without embedded LUT is unavailable\n");return;
+    }
+    require(braw_clip_save_embedded_lut(clip,output.c_str())==0,braw_clip_last_error(clip));
+    const auto original=readBytes(output);
+    require(!original.empty(),"Empty LUT output");
+    std::istringstream cube(std::string(original.begin(),original.end()));std::string line;
+    size_t size=0,rows=0;
+    while(std::getline(cube,line)) {
+        std::istringstream header(line);std::string key;header>>key;
+        if(key=="LUT_3D_SIZE"){header>>size;continue;}
+        std::istringstream values(line);double r,g,b;
+        if(values>>r>>g>>b){require(std::isfinite(r)&&std::isfinite(g)&&std::isfinite(b),"Nonfinite LUT values");rows++;}
+    }
+    require(size>=2&&rows==size*size*size,"Cube dimensions/data rows are incorrect");
+    braw_clip_set_exposure(clip,3);braw_clip_set_preview_lut(clip,false);
+    braw_clip_release_decoder(clip);
+    require(braw_clip_save_embedded_lut(clip,output.c_str())==0,braw_clip_last_error(clip));
+    require(readBytes(output)==original,"Saving LUT incorporated preview adjustments or changed after decoder release");
+    require(braw_clip_save_embedded_lut(clip,dir.path.c_str())!=0,"Writing LUT over a directory succeeded");
+    require(readBytes(output)==original,"Failed save changed previous LUT");
+    braw_clip_close(clip);printf("PASS: %zux%zux%zu original embedded LUT, valid cube, atomic overwrite, reopen and write errors\n",size,size,size);
+}
+static void geometryTone(const char* sample) {
+    SDKDecoder::Frame precision;
+    precision.width=12;precision.height=12;precision.stride=12*6;precision.pixels.resize(12*12*6);
+    const uint16_t channels[]={12345,32769,54321};
+    for(size_t pixel=0;pixel<144;pixel++)for(size_t channel=0;channel<3;channel++)
+        memcpy(precision.pixels.data()+(pixel*3+channel)*2,&channels[channel],2);
+    require(DesqueezeImage(precision,1,2.0f),"Custom 16-bit resample failed");
+    require(precision.width==12&&precision.height==6,"Custom ratio rounding failed");
+    for(size_t pixel=0;pixel<72;pixel++)for(size_t channel=0;channel<3;channel++) {
+        uint16_t value=0;memcpy(&value,precision.pixels.data()+(pixel*3+channel)*2,2);
+        require(value==channels[channel],"Custom desqueeze lost 16-bit channel precision");
+    }
+    // A non-square labelled image catches wrong rotation direction and flip axes.
+    const std::vector<std::vector<uint8_t>> expected={{1,2,3,4,5,6},{5,3,1,6,4,2},{6,5,4,3,2,1},{2,4,6,1,3,5}};
+    for(uint32_t turn=0;turn<4;turn++)for(uint32_t flips=0;flips<4;flips++) {
+        std::vector<uint8_t> pixels(6*4);for(size_t i=0;i<6;i++)for(size_t j=0;j<4;j++)pixels[i*4+j]=i+1;
+        int width=2,height=3;TransformImage<4>(pixels,width,height,turn,flips);
+        const int ew=(turn&1)?3:2,eh=(turn&1)?2:3;
+        require(width==ew&&height==eh,"Rotation did not swap dimensions");
+        for(int y=0;y<eh;y++)for(int x=0;x<ew;x++) {
+            const int ex=(flips&1)?ew-1-x:x,ey=(flips&2)?eh-1-y:y;
+            require(pixels[(y*ew+x)*4]==expected[turn][ey*ew+ex],"Incorrect clockwise rotation or displayed flip axis");
+        }
+    }
+    BrawDecoder decoder;require(decoder.OpenClip(sample),decoder.LastError());
+    const auto geometry=decoder.GetGeometryInfo();const auto tone=decoder.GetToneCurveInfo();
+    ClipAdjustments settings;settings.iso=decoder.GetNativeISO();settings.colorTemp=decoder.GetNativeColorTemp();settings.tint=decoder.GetNativeTint();settings.previewLUT=false;
+    settings.toneValues=tone.defaults;settings.videoBlack=tone.videoBlack;
+    int w=0,h=0,stride=0;
+    for(int format : {0,1}) {
+        decoder.Close();decoder.SetOutputFormat(format);require(decoder.OpenClip(sample),decoder.LastError());
+        settings.anamorphic=0;settings.rotation=0;settings.flips=0;settings.toneCurveEnabled=false;
+        const auto baseline=decoder.DecodeFrameSync(0,&w,&h,&stride,settings,1);require(!baseline.empty(),decoder.LastError());
+        const int nativeW=w,nativeH=h;
+        require(nativeW==int(geometry.dimensions[0][0])&&nativeH==int(geometry.dimensions[0][1]),"As-shot dimensions changed");
+        settings.rotation=1;settings.flips=1;
+        const auto transformed=decoder.DecodeFrameSync(0,&w,&h,&stride,settings,1);require(!transformed.empty(),decoder.LastError());
+        require(w==nativeH&&h==nativeW,"Decoded geometry dimensions are wrong");
+        // Clockwise then horizontal flip maps original top-left to new top-left.
+        require(std::equal(baseline.begin(),baseline.begin()+(format?6:4),transformed.begin()),"Decoded image used wrong displayed flip axis");
+        settings.anamorphic=7;settings.rotation=0;settings.flips=0;
+        require(!decoder.DecodeFrameSync(0,&w,&h,&stride,settings,1).empty(),decoder.LastError());
+        require(w==int(geometry.dimensions[7][0])&&h==int(geometry.dimensions[7][1]),"Anamorphic override did not reach decoder");
+        settings.anamorphic=CustomAnamorphicMode;
+        for(float ratio : {1.0f,1.25f,2.4f,4.0f}) {
+            settings.customDesqueeze=ratio;
+            const auto custom=decoder.DecodeFrameSync(0,&w,&h,&stride,settings,1);
+            require(!custom.empty(),decoder.LastError());
+            require(w==int(geometry.dimensions[1][0])&&h==CustomDesqueezeHeight(geometry.dimensions[1][1],ratio),"Custom desqueeze dimensions incorrect");
+            require(custom.size()==size_t(w)*h*(format?6:4),"Custom desqueeze buffer size incorrect");
+            if(ratio==1 && geometry.dimensions[0]==geometry.dimensions[1])require(custom==baseline,"Custom 1x changed native pixels");
+            settings.rotation=1;
+            require(!decoder.DecodeFrameSync(0,&w,&h,&stride,settings,1).empty(),decoder.LastError());
+            require(h==int(geometry.dimensions[1][0])&&w==CustomDesqueezeHeight(geometry.dimensions[1][1],ratio),"Rotation ignored custom ratio");
+            settings.rotation=0;
+        }
+        settings.anamorphic=0;
+        if(tone.supported) {
+            settings.toneCurveEnabled=true;settings.toneValues[1]=tone.minimum[1];
+            auto adjusted=decoder.DecodeFrameSync(0,&w,&h,&stride,settings,1);require(!adjusted.empty(),decoder.LastError());
+            require(adjusted!=baseline,"Custom tone controls produced no pixel change");
+            settings.toneCurveEnabled=false;settings.toneValues=tone.defaults;
+        }
+        require(decoder.DecodeFrameSync(0,&w,&h,&stride,settings,1)==baseline,"Processing reset did not restore source pixels");
+    }
+    const bool singleFrame=decoder.GetFrameCount()==1;decoder.Close();
+    auto* project=braw_project_create();require(braw_project_import(project,sample)==0,"Processing fixture import failed");
+    auto* clip=braw_project_get_clip(project,0);
+    require(!braw_clip_get_settings(clip).toneCurveEnabled,"Tone curve enabled on import");
+    for(uint32_t mode=0;mode<8;mode++) {
+        braw_clip_set_geometry(clip,mode,1,0);int rw=0,rh=0;braw_clip_get_render_dimensions(clip,&rw,&rh);
+        require(rw==int(geometry.dimensions[mode][1])&&rh==int(geometry.dimensions[mode][0]),"UI geometry disagrees with SDK");
+    }
+    braw_clip_set_custom_desqueeze(clip,2.4f);
+    for(float invalid : {0.0f,.5f,4.1f,INFINITY,NAN}) {
+        braw_clip_set_custom_desqueeze(clip,invalid);
+        require(braw_clip_get_settings(clip).customDesqueeze==2.4f,"Invalid ratio altered settings");
+    }
+    braw_clip_set_geometry(clip,CustomAnamorphicMode,1,0);
+    int customW=0,customH=0;braw_clip_get_render_dimensions(clip,&customW,&customH);
+    require(customW==CustomDesqueezeHeight(geometry.dimensions[1][1],2.4f)&&customH==int(geometry.dimensions[1][0]),"UI dimensions ignored custom ratio");
+    if(singleFrame) {
+        Directory dir;
+        for(int codec : {1,2}) {
+            auto folder=fs::path(dir.path)/std::to_string(codec);fs::create_directory(folder);
+            braw_clip_set_geometry(clip,CustomAnamorphicMode,1,3);
+            if(tone.supported){braw_clip_set_tone_enabled(clip,true);braw_clip_set_tone_value(clip,1,tone.minimum[1]);}
+            int index=0;require(braw_export_start(project,&index,1,codec,0,0,100,folder.c_str(),nullptr,nullptr)==0,braw_export_last_error());
+            auto output=folder/(fs::path(sample).stem().string()+".mov"),bitmap=folder/"frame.bmp";
+            ChildProcess ffmpeg;require(ffmpeg.Start({SiblingExecutable("ffmpeg"),"-hide_banner","-loglevel","error","-i",output.string(),"-frames:v","1","-c:v","bmp",bitmap.string()},false),ffmpeg.Error());
+            ffmpeg.CloseInput();require(ffmpeg.Wait(30),ffmpeg.Error());
+            const auto bytes=readBytes(bitmap);int32_t ow=0,oh=0;memcpy(&ow,bytes.data()+18,4);memcpy(&oh,bytes.data()+22,4);
+            int rw=0,rh=0;braw_clip_get_render_dimensions(clip,&rw,&rh);
+            require(ow==rw&&std::abs(oh)==rh,"MOV geometry differs from preview dimensions");
+        }
+    }
+    braw_project_destroy(project);printf("PASS: geometry, native/custom desqueeze, 16-bit precision, tone, reset, HEVC/ProRes dimensions (tone support %d)\n",tone.supported);
+}
 int main(int argc,char** argv) {
     setvbuf(stdout,nullptr,_IOLBF,0);
     if(argc>1&&std::string(argv[1])=="--hang"){while(true)pause();}
     if(argc>1&&std::string(argv[1])=="--crash")_exit(17);
     if(argc>1&&std::string(argv[1])=="--allocate"){std::vector<uint8_t> memory(128*1024*1024,42);while(true)pause();}
     try {
+        if(argc>1&&std::string(argv[1])=="--embedded-lut") {
+            require(argc==3,"Usage: --embedded-lut clip");embeddedLUT(argv[2]);return 0;
+        }
+        if(argc>1&&std::string(argv[1])=="--geometry-tone") {
+            require(argc==3,"Usage: --geometry-tone one-frame-clip");geometryTone(argv[2]);return 0;
+        }
+        if(argc>1&&std::string(argv[1])=="--lens") {
+            require(argc==3||argc==4,"Usage: --lens clip [SDK scale]");lensCorrections(argv[2],argc==4?std::stof(argv[3]):.125f);return 0;
+        }
+        if(argc>1&&std::string(argv[1])=="--gamut") {
+            require(argc==3,"Usage: --gamut clip");gamutCompression(argv[2]);return 0;
+        }
         if(argc>1&&std::string(argv[1])=="--multichannel-audio") {
             require(argc==3,"Usage: --multichannel-audio clip-with-audio");multichannelAudio(argv[2]);return 0;
         }
@@ -376,6 +587,7 @@ int main(int argc,char** argv) {
             printf("SDK %s; %ux%u; %.6f fps; %llu frames; %.2f seconds; audio %u Hz, %u channels, %u bits, %llu samples\n",
                 decoder.SDKVersion().c_str(),decoder.GetWidth(),decoder.GetHeight(),decoder.GetFrameRate(),decoder.GetFrameCount(),
                 decoder.GetFrameCount()/double(decoder.GetFrameRate()),audio.rate,audio.channels,audio.bits,audio.samples);
+            printf("Lens correction support mask: %u\n",decoder.GetLensCorrectionSupport());
             printf("As-shot ISO %u; read-only %d; supported:",decoder.GetNativeISO(),decoder.ISOIsReadOnly());for(auto iso:decoder.GetISOList())printf(" %u",iso);puts("");return 0;
         }
         if(argc>1&&std::string(argv[1])=="--iso") {

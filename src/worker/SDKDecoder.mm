@@ -1,5 +1,7 @@
 #include "worker/SDKDecoder.h"
 #include "worker/Protocol.h"
+#include "core/ImageGeometry.h"
+#include "core/ImageDesqueeze.h"
 #include "BlackmagicRawAPI.h"
 #include "BlackmagicRawAPIDispatch.cpp"
 #import <Metal/Metal.h>
@@ -13,6 +15,7 @@ struct SDKDecoder::Impl {
     IBlackmagicRawFactory* factory=nullptr;
     IBlackmagicRaw* codec=nullptr;
     IBlackmagicRawClip* clip=nullptr;
+    IBlackmagicRawPost3DLUT* embeddedLUT=nullptr;
     IBlackmagicRawCallback* callback=nullptr;
     id<MTLDevice> device=nil;
     id<MTLCommandQueue> queue=nil;
@@ -23,11 +26,15 @@ struct SDKDecoder::Impl {
     uint32_t width=0,height=0,nativeISO=800,nativeColorTemp=5600;
     std::vector<uint32_t> isoList;
     bool isoReadOnly=true;
+    uint32_t lensCorrectionSupport=0;
     uint64_t frameCount=0;
     float frameRate=0,nativeExposure=0;
     int16_t nativeTint=0;
     int format=0;
     ClipAdjustments adjustments;
+    std::array<IBlackmagicRawClip*,8> geometryClips{};
+    GeometryInfo geometryInfo;
+    ToneCurveInfo toneInfo;
     float scale=1;
     uint32_t previewWidth=0,previewHeight=0;
     Frame frame;
@@ -85,7 +92,8 @@ public:
         IBlackmagicRawFrameProcessingAttributes* attrs=nullptr;
         IBlackmagicRawClipProcessingAttributes* clipAttrs=nullptr;
         frame->CloneFrameProcessingAttributes(&attrs);
-        impl->clip->CloneClipProcessingAttributes(&clipAttrs);
+        const auto mode=impl->adjustments.anamorphic==CustomAnamorphicMode?1:impl->adjustments.anamorphic;
+        impl->geometryClips[mode]->CloneClipProcessingAttributes(&clipAttrs);
         if(!attrs||!clipAttrs) {
             fprintf(stderr,"Missing processing attributes\n");
             if(attrs)attrs->Release(); if(clipAttrs)clipAttrs->Release();
@@ -118,6 +126,66 @@ public:
                 if(SUCCEEDED(attrs->GetISOList(impl->isoList.data(),&count,&impl->isoReadOnly)))impl->isoList.resize(count);
                 else impl->isoList.clear();
             }
+            const BlackmagicRawClipProcessingAttribute lensAttributes[] = {
+                blackmagicRawClipProcessingAttributeLensDistortionCorrectionEnable,
+                blackmagicRawClipProcessingAttributeLensShadingEnable,
+                blackmagicRawClipProcessingAttributeLensChromaticAberrationCorrectionEnable
+            };
+            for (uint32_t i=0;i<3;i++) {
+                Variant minimum,maximum;VariantInit(&minimum);VariantInit(&maximum);bool readOnly=true;
+                HRESULT hr=clipAttrs->GetClipAttributeRange(lensAttributes[i],&minimum,&maximum,&readOnly);
+                if(SUCCEEDED(hr)&&!readOnly&&minimum.vt==blackmagicRawVariantTypeU16&&
+                   maximum.vt==blackmagicRawVariantTypeU16&&minimum.uiVal==0&&maximum.uiVal>=1)
+                    impl->lensCorrectionSupport|=1u<<i;
+                VariantClear(&minimum);VariantClear(&maximum);
+            }
+            IBlackmagicRawToneCurve* curves=nullptr;
+            Variant gamma,gamut,generation;VariantInit(&gamma);VariantInit(&gamut);VariantInit(&generation);
+            clipAttrs->GetClipAttribute(blackmagicRawClipProcessingAttributeGamma,&gamma);
+            clipAttrs->GetClipAttribute(blackmagicRawClipProcessingAttributeGamut,&gamut);
+            clipAttrs->GetClipAttribute(blackmagicRawClipProcessingAttributeColorScienceGen,&generation);
+            const auto gammaName=gamma.vt==blackmagicRawVariantTypeString?SDKDecoder::Impl::FromCFString(gamma.bstrVal):"";
+            const auto gamutName=gamut.vt==blackmagicRawVariantTypeString?SDKDecoder::Impl::FromCFString(gamut.bstrVal):"";
+            auto& tone=impl->toneInfo;
+            if(gamutName=="Blackmagic Design" && (gammaName=="Blackmagic Design Film" ||
+                gammaName=="Blackmagic Design Extended Video" || gammaName=="Blackmagic Design Custom") &&
+                SUCCEEDED(impl->codec->QueryInterface(IID_IBlackmagicRawToneCurve,(void**)&curves)) && curves) {
+                auto camera=CFStringCreateWithCString(nullptr,impl->cameraType.c_str(),kCFStringEncodingUTF8);
+                uint16_t videoBlack=0;auto& values=tone.defaults;
+                HRESULT hr=curves->GetToneCurve(camera,gamma.bstrVal,generation.uiVal,
+                    &values[0],&values[1],&values[2],&values[3],&values[4],&values[5],&values[6],&videoBlack);
+                CFRelease(camera);curves->Release();tone.videoBlack=videoBlack!=0;
+                if(gammaName=="Blackmagic Design Custom") {
+                    Variant nativeBlack{};
+                    if(SUCCEEDED(clipAttrs->GetClipAttribute(blackmagicRawClipProcessingAttributeToneCurveVideoBlackLevel,&nativeBlack))&&nativeBlack.vt==blackmagicRawVariantTypeU16)
+                        tone.videoBlack=nativeBlack.uiVal!=0;
+                    VariantClear(&nativeBlack);
+                }
+                tone.supported=SUCCEEDED(hr);
+                const BlackmagicRawClipProcessingAttribute keys[]={
+                    blackmagicRawClipProcessingAttributeToneCurveContrast,blackmagicRawClipProcessingAttributeToneCurveSaturation,
+                    blackmagicRawClipProcessingAttributeToneCurveMidpoint,blackmagicRawClipProcessingAttributeToneCurveHighlights,
+                    blackmagicRawClipProcessingAttributeToneCurveShadows,blackmagicRawClipProcessingAttributeToneCurveBlackLevel,
+                    blackmagicRawClipProcessingAttributeToneCurveWhiteLevel};
+                // Probe writable custom-gamma ranges without changing the source attributes.
+                IBlackmagicRawClipProcessingAttributes* custom=nullptr;impl->clip->CloneClipProcessingAttributes(&custom);
+                Variant customGamma{};customGamma.vt=blackmagicRawVariantTypeString;customGamma.bstrVal=CFSTR("Blackmagic Design Custom");
+                if(!custom||FAILED(custom->SetClipAttribute(blackmagicRawClipProcessingAttributeGamma,&customGamma)))tone.supported=false;
+                if(custom) {
+                    for(size_t i=0;i<ToneValueCount;i++) {
+                        Variant lo{},hi{},native{};bool readOnly=true;
+                        if(gammaName=="Blackmagic Design Custom" && SUCCEEDED(clipAttrs->GetClipAttribute(keys[i],&native)) && native.vt==blackmagicRawVariantTypeFloat32)values[i]=native.fltVal;
+                        if(FAILED(custom->GetClipAttributeRange(keys[i],&lo,&hi,&readOnly))||readOnly||
+                           lo.vt!=blackmagicRawVariantTypeFloat32||hi.vt!=blackmagicRawVariantTypeFloat32||lo.fltVal>=hi.fltVal)tone.supported=false;
+                        else {tone.minimum[i]=lo.fltVal;tone.maximum[i]=hi.fltVal;values[i]=std::clamp(values[i],lo.fltVal,hi.fltVal);}
+                        VariantClear(&lo);VariantClear(&hi);VariantClear(&native);
+                    }
+                    Variant lo{},hi{};bool readOnly=true;
+                    tone.videoBlackSupported=SUCCEEDED(custom->GetClipAttributeRange(blackmagicRawClipProcessingAttributeToneCurveVideoBlackLevel,&lo,&hi,&readOnly))&&!readOnly;
+                    VariantClear(&lo);VariantClear(&hi);custom->Release();
+                }
+            }
+            VariantClear(&gamma);VariantClear(&gamut);VariantClear(&generation);
             if(impl->isoList.empty()) {impl->isoList={impl->nativeISO};impl->isoReadOnly=true;}
         }
         // ISO=0 and temperature=0 mean native. Zero tint is a valid adjustment.
@@ -140,6 +208,56 @@ public:
         attrs->SetFrameAttribute(blackmagicRawFrameProcessingAttributeExposure,&v);
         v.vt=blackmagicRawVariantTypeU16; v.uiVal=a.highlightRecovery?1:0;
         clipAttrs->SetClipAttribute(blackmagicRawClipProcessingAttributeHighlightRecovery,&v);
+        v.uiVal=a.gamutCompression?1:0;
+        HRESULT gamutResult=clipAttrs->SetClipAttribute(blackmagicRawClipProcessingAttributeGamutCompressionEnable,&v);
+        if(FAILED(gamutResult)) {
+            fprintf(stderr,"Could not set gamut compression to %s: 0x%x\n",a.gamutCompression?"enabled":"disabled",unsigned(gamutResult));
+            attrs->Release();clipAttrs->Release();if(job)job->Release();impl->Finish(false);return;
+        }
+        if(a.lensCorrections & ~impl->lensCorrectionSupport) {
+            fprintf(stderr,"Requested lens correction is unavailable for this clip.\n");
+            attrs->Release();clipAttrs->Release();if(job)job->Release();impl->Finish(false);return;
+        }
+        const BlackmagicRawClipProcessingAttribute lensAttributes[] = {
+            blackmagicRawClipProcessingAttributeLensDistortionCorrectionEnable,
+            blackmagicRawClipProcessingAttributeLensShadingEnable,
+            blackmagicRawClipProcessingAttributeLensChromaticAberrationCorrectionEnable
+        };
+        for(uint32_t i=0;i<3;i++)if(impl->lensCorrectionSupport & (1u<<i)) {
+            v.uiVal=(a.lensCorrections & (1u<<i))?1:0;
+            HRESULT hr=clipAttrs->SetClipAttribute(lensAttributes[i],&v);
+            if(FAILED(hr)) {
+                fprintf(stderr,"Could not apply lens correction %u: 0x%x\n",i,unsigned(hr));
+                attrs->Release();clipAttrs->Release();if(job)job->Release();impl->Finish(false);return;
+            }
+        }
+        if(a.toneCurveEnabled) {
+            if(!impl->toneInfo.supported) {
+                fprintf(stderr,"Custom tone curves are unavailable for this source gamma/gamut.\n");
+                attrs->Release();clipAttrs->Release();if(job)job->Release();impl->Finish(false);return;
+            }
+            v.vt=blackmagicRawVariantTypeString;v.bstrVal=CFSTR("Blackmagic Design Custom");
+            HRESULT hr=clipAttrs->SetClipAttribute(blackmagicRawClipProcessingAttributeGamma,&v);
+            const BlackmagicRawClipProcessingAttribute keys[]={
+                blackmagicRawClipProcessingAttributeToneCurveContrast,blackmagicRawClipProcessingAttributeToneCurveSaturation,
+                blackmagicRawClipProcessingAttributeToneCurveMidpoint,blackmagicRawClipProcessingAttributeToneCurveHighlights,
+                blackmagicRawClipProcessingAttributeToneCurveShadows,blackmagicRawClipProcessingAttributeToneCurveBlackLevel,
+                blackmagicRawClipProcessingAttributeToneCurveWhiteLevel};
+            v.vt=blackmagicRawVariantTypeFloat32;
+            for(size_t i=0;i<ToneValueCount&&SUCCEEDED(hr);i++) {
+                v.fltVal=a.toneValues[i];
+                if(!std::isfinite(v.fltVal)||v.fltVal<impl->toneInfo.minimum[i]||v.fltVal>impl->toneInfo.maximum[i])hr=E_INVALIDARG;
+                else hr=clipAttrs->SetClipAttribute(keys[i],&v);
+            }
+            if(SUCCEEDED(hr)&&impl->toneInfo.videoBlackSupported) {
+                v.vt=blackmagicRawVariantTypeU16;v.uiVal=a.videoBlack?1:0;
+                hr=clipAttrs->SetClipAttribute(blackmagicRawClipProcessingAttributeToneCurveVideoBlackLevel,&v);
+            }
+            if(FAILED(hr)) {
+                fprintf(stderr,"Could not apply custom tone curve: 0x%x\n",unsigned(hr));
+                attrs->Release();clipAttrs->Release();if(job)job->Release();impl->Finish(false);return;
+            }
+        }
         v.vt=blackmagicRawVariantTypeString; v.bstrVal=a.previewLUT?CFSTR("Embedded"):CFSTR("Disabled");
         HRESULT lutResult=clipAttrs->SetClipAttribute(blackmagicRawClipProcessingAttributePost3DLUTMode,&v);
         if(FAILED(lutResult)) {
@@ -265,6 +383,27 @@ bool SDKDecoder::Open(const std::string& path,bool metal,int format) {
     if(!cf){fprintf(stderr,"Could not convert source path to a UTF-8 string\n");return false;}
     hr=p.codec->OpenClip(cf,&p.clip); CFRelease(cf);
     if(FAILED(hr)||!p.clip){fprintf(stderr,"OpenClip failed: 0x%x\n",unsigned(hr));return false;}
+    IBlackmagicRawClipProcessingAttributes* lutAttributes=nullptr;
+    if(SUCCEEDED(p.clip->CloneClipProcessingAttributes(&lutAttributes))&&lutAttributes) {
+        lutAttributes->GetEmbeddedPost3DLUT(&p.embeddedLUT);
+        lutAttributes->Release();
+    }
+    const BlackmagicRawAnamorphicRatio ratios[]={blackmagicRawAnamorphicRatioFromMetadata,
+        blackmagicRawAnamorphicRatioDisabled,blackmagicRawAnamorphicRatio133x,blackmagicRawAnamorphicRatio15x,
+        blackmagicRawAnamorphicRatio16x,blackmagicRawAnamorphicRatio166x,blackmagicRawAnamorphicRatio18x,blackmagicRawAnamorphicRatio2x};
+    p.geometryClips[0]=p.clip;p.clip->AddRef();
+    for(size_t i=0;i<8;i++) {
+        if(i) {
+            IBlackmagicRawClipGeometry* geometry=nullptr;
+            HRESULT result=p.factory->CreateClipGeometry(&geometry);
+            if(SUCCEEDED(result)&&geometry)result=geometry->SetAnamorphicRatio(ratios[i]);
+            if(SUCCEEDED(result))result=p.clip->CloneWithGeometry(geometry,&p.geometryClips[i]);
+            if(geometry)geometry->Release();
+            if(FAILED(result)||!p.geometryClips[i]){fprintf(stderr,"Cannot configure anamorphic geometry: 0x%x\n",unsigned(result));return false;}
+        }
+        p.geometryClips[i]->GetWidth(&p.geometryInfo.dimensions[i][0]);
+        p.geometryClips[i]->GetHeight(&p.geometryInfo.dimensions[i][1]);
+    }
     p.clip->GetWidth(&p.width); p.clip->GetHeight(&p.height);
     p.clip->GetFrameCount(&p.frameCount); p.clip->GetFrameRate(&p.frameRate);
     if(!p.width||!p.height||!p.frameCount||p.frameRate<=0){fprintf(stderr,"Invalid metadata: %u x %u, %llu frames, %f fps\n",p.width,p.height,p.frameCount,p.frameRate);return false;}
@@ -297,20 +436,24 @@ bool SDKDecoder::Open(const std::string& path,bool metal,int format) {
 }
 void SDKDecoder::Close() {
     auto& p=*m_impl;
+    if(p.embeddedLUT){p.embeddedLUT->Release();p.embeddedLUT=nullptr;}
     if(p.codec) { p.codec->FlushJobs(); p.codec->SetCallback(nullptr); }
+    for(auto*& clip:p.geometryClips)if(clip){clip->Release();clip=nullptr;}
     if(p.clip){p.clip->Release();p.clip=nullptr;}
     if(p.codec){p.codec->Release();p.codec=nullptr;}
     if(p.callback){p.callback->Release();p.callback=nullptr;}
     if(p.factory){p.factory->Release();p.factory=nullptr;}
     p.device=nil;p.queue=nil;p.nativeCaptured=false;p.width=0;p.height=0;
-    p.frameMetadata.clear();p.isoList.clear();p.isoReadOnly=true;
+    p.frameMetadata.clear();p.isoList.clear();p.isoReadOnly=true;p.lensCorrectionSupport=0;p.toneInfo={};p.geometryInfo={};
 }
 bool SDKDecoder::Decode(uint64_t index,const ClipAdjustments& a,float scale,Frame& out) {
     auto& p=*m_impl;
     if(!p.clip||index>=p.frameCount) {fprintf(stderr,"Cannot read frame %llu: clip open=%d, frame count=%llu\n",index,p.clip!=nullptr,p.frameCount);return false;}
     {std::lock_guard lock(p.mutex);p.completed=false;p.frameOK=false;p.frame={};p.adjustments=a;p.scale=scale;}
     IBlackmagicRawJob* job=nullptr;
-    HRESULT hr=p.clip->CreateJobReadFrame(index,&job);
+    if(a.anamorphic>CustomAnamorphicMode||a.rotation>3||a.flips>3||!ValidCustomDesqueeze(a.customDesqueeze)){fprintf(stderr,"Invalid image geometry\n");return false;}
+    const auto mode=a.anamorphic==CustomAnamorphicMode?1:a.anamorphic;
+    HRESULT hr=p.geometryClips[mode]->CreateJobReadFrame(index,&job);
     if(FAILED(hr)||!job){fprintf(stderr,"Create read job for frame %llu failed: 0x%x\n",index,unsigned(hr));return false;}
     hr=job->Submit();
     if(FAILED(hr)){fprintf(stderr,"Submit read job for frame %llu failed: 0x%x\n",index,unsigned(hr));job->Release();return false;}
@@ -318,16 +461,45 @@ bool SDKDecoder::Decode(uint64_t index,const ClipAdjustments& a,float scale,Fram
     // An expired request cannot reuse callback storage. Exit the worker instead.
     if(!p.cv.wait_for(lock,std::chrono::seconds(25),[&]{return p.completed;}))_exit(22);
     if(!p.frameOK)return false;
-    out=std::move(p.frame);return true;
+    out=std::move(p.frame);
+    if(a.anamorphic==CustomAnamorphicMode && !DesqueezeImage(out,p.format,a.customDesqueeze)) {
+        fprintf(stderr,"Custom desqueeze failed\n");return false;
+    }
+    if(p.format==1)TransformImage<6>(out.pixels,out.width,out.height,a.rotation,a.flips);
+    else TransformImage<4>(out.pixels,out.width,out.height,a.rotation,a.flips);
+    out.stride=out.width*(p.format==1?6:4);return true;
 }
 #define GETTER(type,name,field) type SDKDecoder::name() const {return m_impl->field;}
 GETTER(uint32_t,GetWidth,width) GETTER(uint32_t,GetHeight,height)
 GETTER(float,GetFrameRate,frameRate) GETTER(uint64_t,GetFrameCount,frameCount)
 GETTER(uint32_t,GetNativeISO,nativeISO) GETTER(uint32_t,GetNativeColorTemp,nativeColorTemp)
-GETTER(std::vector<uint32_t>,GetISOList,isoList) GETTER(bool,ISOIsReadOnly,isoReadOnly)
+GETTER(std::vector<uint32_t>,GetISOList,isoList) GETTER(bool,ISOIsReadOnly,isoReadOnly) GETTER(uint32_t,GetLensCorrectionSupport,lensCorrectionSupport)
 GETTER(int16_t,GetNativeTint,nativeTint) GETTER(float,GetNativeExposure,nativeExposure)
 GETTER(std::string,GetCameraType,cameraType) GETTER(std::string,Version,version)
 #undef GETTER
+GeometryInfo SDKDecoder::GetGeometryInfo() const{return m_impl->geometryInfo;}
+ToneCurveInfo SDKDecoder::GetToneCurveInfo() const{return m_impl->toneInfo;}
+bool SDKDecoder::HasEmbeddedLUT() const{return m_impl->embeddedLUT!=nullptr;}
+std::string SDKDecoder::EmbeddedLUTName() const {
+    if(!m_impl->embeddedLUT)return {};
+    CFStringRef name=nullptr;m_impl->embeddedLUT->GetName(&name);
+    const auto result=Impl::FromCFString(name);if(name)CFRelease(name);return result;
+}
+bool SDKDecoder::ReadEmbeddedLUTCube(std::vector<uint8_t>& bytes) {
+    bytes.clear();if(!m_impl->embeddedLUT)return false;
+    char path[]="/tmp/braw-embedded-lut-XXXXXX";
+    int fd=mkstemp(path);if(fd<0)return false;close(fd);
+    auto file=CFStringCreateWithCString(nullptr,path,kCFStringEncodingUTF8);
+    HRESULT result=m_impl->embeddedLUT->WriteCubeFile(file);CFRelease(file);
+    if(SUCCEEDED(result)) {
+        NSData* data=[NSData dataWithContentsOfFile:[NSString stringWithUTF8String:path]];
+        if(data.length && data.length<=WorkerProtocol::maxPayload)
+            bytes.assign((const uint8_t*)data.bytes,(const uint8_t*)data.bytes+data.length);
+    }
+    unlink(path);
+    if(bytes.empty())fprintf(stderr,"Could not extract embedded LUT: 0x%x\n",unsigned(result));
+    return !bytes.empty();
+}
 #include "SDKMetadata.inc"
 SDKDecoder::AudioInfo SDKDecoder::GetAudioInfo() {
     AudioInfo info; IBlackmagicRawClipAudio* audio=nullptr;

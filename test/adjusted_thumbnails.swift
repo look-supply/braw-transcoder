@@ -39,7 +39,11 @@ struct AdjustedThumbnailTests {
         paths = (0..<2).map { String(cString: braw_clip_get_filepath(braw_project_get_clip(project.projectHandle, Int32($0)))) } + [paths[2]]
         let inactive = project.getClip(at: 0)!
         let active = project.getClip(at: 1)!
+        precondition(!active.gamutCompression && !inactive.gamutCompression, "Gamut compression is enabled by default")
         precondition(!active.highlightRecovery && !inactive.highlightRecovery, "Imports forced highlight recovery on")
+        precondition(active.lensCorrections == 0, "Lens corrections enabled on import")
+        active.lensCorrections = UInt32.max
+        precondition(active.lensCorrections == active.lensCorrectionSupport, "Unsupported lens controls remained enabled")
         project.selectClip(1)
         inactive.loadThumbnail()
         active.loadThumbnail()
@@ -77,9 +81,36 @@ struct AdjustedThumbnailTests {
         try await waitUntil { !active.isLoadingPreview && !active.isLoadingThumbnail }
         precondition(active.thumbnail !== previous, "LUT change did not refresh thumbnail")
 
+        let beforeGamutPreview = active.preview
+        previous = active.thumbnail
+        active.gamutCompression = true
+        try await waitUntil { !active.isLoadingPreview && !active.isLoadingThumbnail }
+        precondition(active.previewError == nil && active.thumbnail !== previous && active.preview !== beforeGamutPreview,
+                     "Gamut compression did not refresh thumbnail and preview")
+        precondition(braw_clip_get_settings(braw_project_get_clip(project.projectHandle, 1)).gamutCompression,
+                     "Export settings lost gamut compression")
+
+        active.lensCorrections = 0
+        active.customDesqueeze = 2.4
+        active.anamorphicMode = 8
+        active.rotation = 1
+        active.flipHorizontal = true
+        if active.toneCurveSupported {
+            active.toneCurveEnabled = true
+            active.toneValues[1] = active.toneRanges[1].minimum
+        }
+        try await waitUntil { !active.isLoadingPreview && !active.isLoadingThumbnail }
+        let transformedSize = active.renderDimensions
+        precondition(transformedSize.width > 0 && transformedSize.height > 0, "Geometry dimensions missing")
+        precondition(active.previewError == nil, "Geometry/tone preview failed")
+
         project.copySettings(from: 1)
         project.pasteSettings(to: 0)
         try await waitUntil { !inactive.isLoadingThumbnail }
+        precondition(inactive.anamorphicMode == 8 && inactive.customDesqueeze == 2.4 && inactive.rotation == 1 && inactive.flipHorizontal,
+                     "Paste lost geometry")
+        precondition(inactive.toneCurveEnabled == active.toneCurveEnabled && inactive.toneValues == active.toneValues,
+                     "Paste lost tone curve")
         precondition(pixels(inactive.thumbnail) == pixels(active.thumbnail), "Pasted settings did not update inactive thumbnail")
         precondition(inactive.preview === inactivePreview, "Inactive clip unnecessarily decoded a full preview")
 
@@ -101,7 +132,12 @@ struct AdjustedThumbnailTests {
         for target in [inactive, offscreen] {
             precondition(target.iso == active.iso && target.colorTemp == active.colorTemp &&
                          target.tint == active.tint && target.exposure == active.exposure &&
-                         target.highlightRecovery == active.highlightRecovery && target.previewLUT == active.previewLUT,
+                         target.highlightRecovery == active.highlightRecovery && target.previewLUT == active.previewLUT &&
+                         target.gamutCompression == active.gamutCompression &&
+                         target.lensCorrections == active.lensCorrections && target.anamorphicMode == active.anamorphicMode &&
+                         target.customDesqueeze == active.customDesqueeze &&
+                         target.rotation == active.rotation && target.flipHorizontal == active.flipHorizontal &&
+                         target.toneCurveEnabled == active.toneCurveEnabled && target.toneValues == active.toneValues,
                          "Apply to All lost adjustments")
             precondition(target.colorPresetIndex == ClipModel.colorPresetLabels.count - 1,
                          "Apply to All left white balance labeled As Shot")
@@ -117,7 +153,11 @@ struct AdjustedThumbnailTests {
         project.selectClip(1)
 
         active.resetAdjustments()
-        precondition(!active.highlightRecovery, "Reset forced highlight recovery on")
+        precondition(active.anamorphicMode == 0 && active.customDesqueeze == 2 && active.rotation == 0 && !active.flipHorizontal && !active.flipVertical,
+                     "Reset did not restore as-shot geometry")
+        precondition(!active.toneCurveEnabled && active.toneValues == active.toneDefaults, "Reset did not restore tone defaults")
+        precondition(active.lensCorrections == 0, "Reset did not disable lens corrections")
+        precondition(!active.highlightRecovery && !active.gamutCompression, "Reset did not disable recovery/compression")
         try await waitUntil { !active.isLoadingThumbnail && !active.isLoadingPreview }
         precondition(pixels(active.thumbnail) == baseline, "Reset did not restore thumbnail pixels")
 

@@ -50,9 +50,13 @@ static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution
     if(!decoder.OpenClip(braw_clip_get_filepath(clip))){setError(decoder.LastError());return false;}
     auto settings=braw_clip_get_settings(clip);
     ClipAdjustments a;a.iso=settings.iso;a.colorTemp=settings.temperature;a.tint=settings.tint;
-    a.exposure=settings.exposure;a.highlightRecovery=settings.highlightRecovery;
+    a.exposure=settings.exposure;a.highlightRecovery=settings.highlightRecovery;a.gamutCompression=settings.gamutCompression;a.lensCorrections=settings.lensCorrections;
     // Camera LUT is a preview setting; preserve the original log image in exports.
     a.previewLUT=false;
+    a.anamorphic=settings.anamorphic;a.rotation=settings.rotation;a.flips=settings.flips;
+    a.customDesqueeze=settings.customDesqueeze;
+    a.toneCurveEnabled=settings.toneCurveEnabled;a.videoBlack=settings.videoBlack;
+    std::copy(std::begin(settings.toneValues),std::end(settings.toneValues),a.toneValues.begin());
     auto audio=decoder.GetAudioInfo();
     fs::path audioFile=dir.path/"audio.pcm";
     bool hasAudio=audio.rate&&audio.channels&&audio.samples;
@@ -72,7 +76,7 @@ static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution
             start+=count;
         }
     }
-    int nativeWidth=decoder.GetWidth(),nativeHeight=decoder.GetHeight();
+    int nativeWidth=0,nativeHeight=0;braw_clip_get_render_dimensions(clip,&nativeWidth,&nativeHeight);
     int targetWidth=0,targetHeight=0;
     if(!CalculateExportDimensions(resolution,nativeWidth,nativeHeight,targetWidth,targetHeight)) {
         setError("Invalid export resolution or source dimensions.");return false;
@@ -103,14 +107,30 @@ static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution
     // Blackmagic gamuts or Film curves to unrelated standard NCLC code points.
     // Descriptive source values remain available for unsupported encodings.
     // Supported camera encodings also receive the vendor's QuickTime keys.
-    const auto gamma=decoder.GetClipGamma();
+    const auto sourceGamma=decoder.GetClipGamma();
+    const auto gamma=a.toneCurveEnabled?std::string("Blackmagic Design Custom"):sourceGamma;
     const auto gamut=decoder.GetClipGamut();
     const auto generation=decoder.GetColorScienceGen();
     const auto camera=decoder.GetCameraType();
     auto metadata=[&](const std::string& key,const std::string& value) {
         if(!value.empty())args.insert(args.end(),{"-metadata",key+"="+value});
     };
-    metadata("com.brawtranscoder.source.gamma",gamma);
+    metadata("com.brawtranscoder.render.lens_distortion",(a.lensCorrections&1)?"true":"false");
+    metadata("com.brawtranscoder.render.lens_shading",(a.lensCorrections&2)?"true":"false");
+    metadata("com.brawtranscoder.render.lens_chromatic_aberration",(a.lensCorrections&4)?"true":"false");
+    metadata("com.brawtranscoder.render.gamut_compression",a.gamutCompression?"true":"false");
+    metadata("com.brawtranscoder.source.gamma",sourceGamma);
+    metadata("com.brawtranscoder.render.gamma",gamma);
+    metadata("com.brawtranscoder.render.anamorphic_mode",std::to_string(a.anamorphic));
+    if(a.anamorphic==8)metadata("com.brawtranscoder.render.desqueeze_ratio",std::to_string(a.customDesqueeze));
+    metadata("com.brawtranscoder.render.rotation_degrees",std::to_string(a.rotation*90));
+    metadata("com.brawtranscoder.render.flips",std::to_string(a.flips));
+    metadata("com.brawtranscoder.render.tone_curve",a.toneCurveEnabled?"true":"false");
+    if(a.toneCurveEnabled) {
+        const char* names[]={"contrast","saturation","midpoint","highlights","shadows","black_level","white_level"};
+        for(size_t i=0;i<ToneValueCount;i++)metadata(std::string("com.brawtranscoder.render.tone.")+names[i],std::to_string(a.toneValues[i]));
+        metadata("com.brawtranscoder.render.tone.video_black",a.videoBlack?"true":"false");
+    }
     metadata("com.brawtranscoder.source.gamut",gamut);
     metadata("com.brawtranscoder.source.camera_type",camera);
     if(generation)metadata("com.brawtranscoder.source.color_science_generation",std::to_string(generation));
