@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RGBWaveformView: View {
     @ObservedObject var clip: ClipModel
+    var onClose: () -> Void = {}
 
     private var scopeImage: CGImage? {
         guard let waveform = clip.waveform,
@@ -21,6 +22,9 @@ struct RGBWaveformView: View {
                 if clip.isLoadingPreview {
                     Text("Updating…").font(.system(size: 9)).foregroundStyle(.secondary)
                 }
+                Button(action: onClose) { Image(systemName: "xmark") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .help("Hide waveform").accessibilityLabel("Hide waveform")
             }
             HStack(spacing: 5) {
                 VStack(spacing: 0) {
@@ -76,11 +80,11 @@ struct RGBWaveformView: View {
                     .font(.system(size: 9, design: .monospaced)).foregroundStyle(.orange)
                 }
             }
-            Text(clip.previewLUT ? "Preview signal · includes LUT" : "Preview signal · LUT off")
+            Text(clip.previewMode == .embeddedLUT ? "Preview signal · includes LUT" : "Log signal · LUT off")
                 .font(.system(size: 9)).foregroundStyle(.secondary)
         }
         .padding(12)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .help("RGB preview levels from 0 to 100. The horizontal axis follows image position. Values at 100 indicate preview saturation; raw sensor clipping and export levels may differ, particularly with a preview LUT.")
     }
 }

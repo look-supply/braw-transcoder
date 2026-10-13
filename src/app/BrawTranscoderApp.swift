@@ -17,6 +17,11 @@ struct BrawTranscoderApp: App {
         }
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(after: .windowArrangement) {
+                Button(project.waveformVisible ? "Hide Waveform" : "Show Waveform") {
+                    project.waveformVisible.toggle()
+                }
+            }
             CommandGroup(after: .newItem) {
                 Button("Import BRAW...") {
                     openFilePicker()

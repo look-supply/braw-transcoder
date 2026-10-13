@@ -57,7 +57,7 @@ target_link_libraries(braw_worker PRIVATE "-framework Foundation" "-framework Me
 add_executable(${PROJECT_NAME}
     src/app/BrawTranscoderApp.swift
     src/app/ProjectModel.swift
-    src/app/RGBWaveform.swift
+    src/app/RGBWaveform.swift src/app/PreviewMonitoring.swift
     src/app/Views/ContentView.swift
     src/app/Views/SidebarView.swift
     src/app/Views/PreviewView.swift
@@ -139,9 +139,9 @@ add_test(NAME export_color_metadata COMMAND braw_color_metadata_test)
 add_executable(braw_quicktime_metadata_test test/quicktime_metadata.cpp src/core/QuickTimeMetadata.cpp)
 target_include_directories(braw_quicktime_metadata_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME quicktime_metadata COMMAND braw_quicktime_metadata_test)
-add_executable(braw_waveform_test test/waveform.swift src/app/RGBWaveform.swift)
+add_executable(braw_waveform_test test/waveform.swift src/app/RGBWaveform.swift src/app/PreviewMonitoring.swift)
 add_test(NAME rgb_waveform COMMAND braw_waveform_test)
-add_executable(braw_model_test test/adjusted_thumbnails.swift src/app/ProjectModel.swift src/app/RGBWaveform.swift)
+add_executable(braw_model_test test/adjusted_thumbnails.swift src/app/ProjectModel.swift src/app/RGBWaveform.swift src/app/PreviewMonitoring.swift)
 target_include_directories(braw_model_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(braw_model_test PRIVATE
     "SHELL:-import-objc-header ${CMAKE_SOURCE_DIR}/src/bridge/braw_api.h")
@@ -152,14 +152,23 @@ target_link_libraries(braw_numeric_slider_test PRIVATE "-framework AppKit" "-fra
 add_test(NAME numeric_slider COMMAND braw_numeric_slider_test)
 set_tests_properties(numeric_slider PROPERTIES TIMEOUT 20)
 add_executable(braw_export_panel_test test/export_panel.swift src/app/ProjectModel.swift
-    src/app/RGBWaveform.swift src/app/Views/ExportView.swift
+    src/app/RGBWaveform.swift src/app/PreviewMonitoring.swift src/app/Views/ExportView.swift
     src/app/Views/ExportControlsLayout.swift src/app/Views/FullWidthDropdown.swift)
 target_include_directories(braw_export_panel_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(braw_export_panel_test PRIVATE
     "SHELL:-import-objc-header ${CMAKE_SOURCE_DIR}/src/bridge/braw_api.h")
 target_link_libraries(braw_export_panel_test PRIVATE braw_core "-framework AppKit" "-framework SwiftUI" "-framework CoreFoundation")
 add_dependencies(braw_export_panel_test braw_worker)
+add_executable(braw_preview_monitoring_test test/preview_monitoring.swift src/app/ProjectModel.swift
+    src/app/RGBWaveform.swift src/app/PreviewMonitoring.swift src/app/Views/PreviewView.swift)
+target_include_directories(braw_preview_monitoring_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(braw_preview_monitoring_test PRIVATE
+    "SHELL:-import-objc-header ${CMAKE_SOURCE_DIR}/src/bridge/braw_api.h")
+target_link_libraries(braw_preview_monitoring_test PRIVATE braw_core "-framework AppKit" "-framework SwiftUI" "-framework CoreFoundation")
+add_dependencies(braw_preview_monitoring_test braw_worker)
 if(EXISTS "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    add_test(NAME preview_monitoring COMMAND braw_preview_monitoring_test "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    set_tests_properties(preview_monitoring PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 60)
     add_test(NAME export_panel COMMAND braw_export_panel_test "${BRAW_SDK_ROOT}/../Media/sample.braw")
     set_tests_properties(export_panel PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 30)
     add_test(NAME embedded_lut COMMAND braw_reliability_test --embedded-lut "${BRAW_SDK_ROOT}/../Media/sample.braw")

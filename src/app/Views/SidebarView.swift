@@ -32,7 +32,7 @@ struct SidebarView: View {
             
             Divider()
             
-            ScrollView {
+            ScrollView(.vertical) {
                 LazyVStack(spacing: 0) {
                     ForEach(0..<project.clipCount, id: \.self) { index in
                         if let clip = project.getClip(at: index) {
@@ -74,6 +74,7 @@ struct SidebarView: View {
                         }
                     }
                 }
+                .background(StableClipListScrollbar())
             }
             .overlay {
                 if project.clipCount == 0 {
@@ -273,5 +274,33 @@ struct ClipRowView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(isActive ? Color.accentColor.opacity(0.06) : Color.clear)
+    }
+}
+
+
+/// Reserve one scrollbar gutter throughout the list's lifetime. macOS's
+/// automatic scroller visibility must not resize aspect-ratio-based clip rows.
+private struct StableClipListScrollbar: NSViewRepresentable {
+    func makeNSView(context: Context) -> Anchor { Anchor() }
+    func updateNSView(_ view: Anchor, context: Context) { view.configureAfterLayout() }
+
+    final class Anchor: NSView {
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            configureAfterLayout()
+        }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            configureAfterLayout()
+        }
+        func configureAfterLayout() {
+            DispatchQueue.main.async { [weak self] in
+                guard let scrollView = self?.enclosingScrollView else { return }
+                scrollView.scrollerStyle = .legacy
+                scrollView.hasVerticalScroller = true
+                scrollView.hasHorizontalScroller = false
+                scrollView.autohidesScrollers = false
+            }
+        }
     }
 }

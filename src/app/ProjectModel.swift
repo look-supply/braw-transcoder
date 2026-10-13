@@ -12,6 +12,7 @@ private struct DecodedPixels: Sendable {
 private struct DecodeResult: Sendable {
     var pixels: DecodedPixels?
     var waveform: RGBWaveform?
+    var falseColorPixels: DecodedPixels?
     var error: String = ""
 }
 private final class NativeClip: @unchecked Sendable {
@@ -24,7 +25,7 @@ private final class NativeClip: @unchecked Sendable {
     deinit { braw_clip_close(handle) }
     func setLatest(_ request: UInt64) { lock.withLock { latestRequest = request } }
     func setLatestThumbnail(_ request: UInt64) { lock.withLock { latestThumbnailRequest = request } }
-    func decode(index: UInt64, scale: Float, request: UInt64? = nil, thumbnailRequest: UInt64? = nil, analyzeWaveform: Bool = false) async -> DecodeResult {
+    func decode(index: UInt64, scale: Float, request: UInt64? = nil, thumbnailRequest: UInt64? = nil, analyzeWaveform: Bool = false, mode: PreviewMode? = nil, falseColor: Bool = false) async -> DecodeResult {
         await withCheckedContinuation { continuation in
             queue.async { [self] in
                 let isStale = { [self] in
@@ -38,7 +39,10 @@ private final class NativeClip: @unchecked Sendable {
                     continuation.resume(returning: DecodeResult()); return
                 }
                 var width: Int32 = 0, height: Int32 = 0
-                guard let pixels = braw_clip_decode_frame_scaled(handle, index, &width, &height, scale) else {
+                let decoded = mode == nil
+                    ? braw_clip_decode_frame_scaled(handle, index, &width, &height, scale)
+                    : braw_clip_decode_monitor_frame(handle, index, &width, &height, scale, mode != .embeddedLUT)
+                guard let pixels = decoded else {
                     continuation.resume(returning: DecodeResult(error: String(cString: braw_clip_last_error(handle)))); return
                 }
                 defer { braw_clip_free_frame(pixels) }
@@ -52,7 +56,10 @@ private final class NativeClip: @unchecked Sendable {
                 }
                 let waveform = analyzeWaveform
                     ? RGBWaveform.analyze(bgra: frame.data, width: frame.width, height: frame.height) : nil
-                continuation.resume(returning: DecodeResult(pixels: frame, waveform: waveform))
+                let falsePixels = falseColor
+                    ? FalseColor.render(bgra: frame.data, width: frame.width, height: frame.height)
+                        .map { DecodedPixels(data: $0, width: frame.width, height: frame.height) } : nil
+                continuation.resume(returning: DecodeResult(pixels: frame, waveform: waveform, falseColorPixels: falsePixels))
             }
         }
     }
@@ -180,7 +187,19 @@ final class ClipModel: Identifiable, ObservableObject {
         }
     }
     @Published var previewLUT = true {
-        didSet { if let h = handle { braw_clip_set_preview_lut(h, previewLUT) }; schedulePreviewRefresh() }
+        didSet {
+            if let h = handle { braw_clip_set_preview_lut(h, previewLUT) }
+            schedulePreviewRefresh()
+        }
+    }
+    @Published var falseColorEnabled = false {
+        didSet {
+            if oldValue != falseColorEnabled, isPreviewActive { loadPreviewFrame() }
+        }
+    }
+    var previewMode: PreviewMode {
+        get { previewLUT ? .embeddedLUT : .log }
+        set { if newValue != previewMode { previewLUT = newValue == .embeddedLUT } }
     }
     @Published var currentFrame: UInt64 = 0 {
         didSet { loadPreviewFrame() }
@@ -487,18 +506,18 @@ final class ClipModel: Identifiable, ObservableObject {
         loadRequestID += 1
         let requestID = loadRequestID
         let frameIndex = currentFrame
-        // Display previews need screen-sized pixels, especially for 12K/17K
-        // sources. Export resolution remains independent of this SDK reduction.
-        let longestEdge = max(nativeWidth, nativeHeight)
-        let previewScale: Float = longestEdge > 10240 ? 0.125
-            : longestEdge > 5120 ? 0.25 : longestEdge > 2560 ? 0.5 : 1
+        let mode = previewMode
+        let falseColor = falseColorEnabled
+        // Decode the main preview at native resolution for detail inspection.
+        // Sidebar thumbnails retain their separate reduced-resolution path.
+        let previewScale: Float = 1
         native.setLatest(requestID)
         Task { [weak self, native] in
-            let result = await native.decode(index: frameIndex, scale: previewScale, request: requestID, analyzeWaveform: true)
+            let result = await native.decode(index: frameIndex, scale: previewScale, request: requestID, analyzeWaveform: true, mode: mode, falseColor: falseColor)
             guard let self, self.loadRequestID == requestID else { return }
             self.isLoadingPreview = false
             self.waveform = result.waveform
-            if let pixels = result.pixels { self.preview = makeNSImageBGRA(frame: pixels) }
+            if let pixels = result.falseColorPixels ?? result.pixels { self.preview = makeNSImageBGRA(frame: pixels) }
             else if !result.error.isEmpty { self.previewError = result.error }
         }
     }
@@ -533,6 +552,9 @@ final class ProjectModel: ObservableObject {
     fileprivate var nativeOwner: NativeProject { native }
     func releaseDecoders() { for clip in clipCache.values { clip.releaseDecoder() } }
     var projectHandle: OpaquePointer? { native.handle }
+    @Published var waveformVisible = UserDefaults.standard.bool(forKey: "waveformVisible") {
+        didSet { UserDefaults.standard.set(waveformVisible, forKey: "waveformVisible") }
+    }
     @Published var clipCount = 0
     @Published var selectedIndex = -1
     @Published private(set) var selectedIndices: Set<Int> = []

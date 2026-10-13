@@ -112,8 +112,10 @@ struct InspectorView: View {
                 Divider()
                 InspectorFooter(clip: clip, project: project)
                     .fixedSize(horizontal: false, vertical: true)
-                Divider()
-                RGBWaveformView(clip: clip)
+                if project.waveformVisible {
+                    Divider()
+                    RGBWaveformView(clip: clip) { project.waveformVisible = false }
+                }
             } else {
                 Spacer()
                 VStack(spacing: 8) {
@@ -354,16 +356,7 @@ struct InspectorFooter: View {
                 Label("Reset Adjustments", systemImage: "arrow.counterclockwise")
                     .frame(maxWidth: .infinity)
             }
-            HStack {
-                ResettableSettingLabel(title: "Preview embedded LUT") { clip.previewLUT = true }
-                Spacer(minLength: 8)
-                Toggle("Preview embedded LUT", isOn: $clip.previewLUT)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .fixedSize()
-                    .accessibilityLabel("Preview embedded LUT")
-            }
+
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
