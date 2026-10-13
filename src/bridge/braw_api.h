@@ -153,6 +153,10 @@ int  braw_export_start(BrawProjectHandle* proj, const int* indices, int count,
                         int codec, int proResProfile, int resolutionMode, int dataRateMbps,
                         const char* outputDir,
                         ExportProgressFn progressFn, void* ctx);
+int  braw_export_start_with_options(BrawProjectHandle* proj, const int* indices, int count,
+                        int codec, int proResProfile, int resolutionMode, int dataRateMbps,
+                        int gopMode, int chromaMode, const char* outputDir,
+                        ExportProgressFn progressFn, void* ctx);
 int  braw_export_is_running(void);
 void braw_export_cancel(void);
 void braw_export_reset(void);  // No-op while an export is active.

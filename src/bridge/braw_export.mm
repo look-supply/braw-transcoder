@@ -37,7 +37,7 @@ struct TemporaryDirectory {
     ~TemporaryDirectory(){if(!path.empty()){std::error_code error;std::filesystem::remove_all(path,error);}}
 };
 static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution,int bitrate,
-    const std::string& output,ExportProgressFn progress,void* context,int clipIndex,int totalClips) {
+    int gopMode,int chromaMode,const std::string& output,ExportProgressFn progress,void* context,int clipIndex,int totalClips) {
     auto ffmpeg=findFFmpeg();if(ffmpeg.empty()){setError("The bundled video encoder is missing.");return false;}
     namespace fs=std::filesystem;
     fs::path final(output);
@@ -100,8 +100,17 @@ static bool exportClip(BrawClipHandle* clip,int codec,int profile,int resolution
         args.insert(args.end(),audioArgs.begin(),audioArgs.end());
     } else args.insert(args.end(),{"-an"});
     if(targetWidth!=nativeWidth||targetHeight!=nativeHeight)args.insert(args.end(),{"-vf","scale="+std::to_string(targetWidth)+":"+std::to_string(targetHeight)});
-    if(codec==0)args.insert(args.end(),{"-c:v","h264_videotoolbox","-tag:v","avc1","-pix_fmt","yuv420p","-b:v",std::to_string(bitrate)});
-    else if(codec==1)args.insert(args.end(),{"-c:v","hevc_videotoolbox","-tag:v","hvc1","-pix_fmt","p010le","-b:v",std::to_string(bitrate)});
+    if(codec==0) {
+        if(chromaMode==1)
+            args.insert(args.end(),{"-c:v","libx264","-preset","medium","-threads","4","-tag:v","avc1","-pix_fmt","yuv422p","-b:v",std::to_string(bitrate)});
+        else args.insert(args.end(),{"-c:v","h264_videotoolbox","-tag:v","avc1","-pix_fmt","yuv420p","-b:v",std::to_string(bitrate)});
+    } else if(codec==1) {
+        args.insert(args.end(),{"-c:v","hevc_videotoolbox","-tag:v","hvc1",
+            "-profile:v",chromaMode==1?"main42210":"main10",
+            "-pix_fmt",chromaMode==1?"p210le":"p010le","-b:v",std::to_string(bitrate)});
+        if(gopMode==1)args.insert(args.end(),{"-g","1","-bf","0"});
+        else args.insert(args.end(),{"-g","250"});
+    }
     else args.insert(args.end(),{"-c:v","prores_ks","-profile:v",std::to_string(profile),"-pix_fmt",profile>=4?"yuva444p10le":"yuv422p10le","-threads","4"});
     // Preserve the SDK-reported source encoding without mapping proprietary
     // Blackmagic gamuts or Film curves to unrelated standard NCLC code points.
@@ -181,8 +190,9 @@ int braw_export_prepare() {
     if(g_running.load())return -1;
     g_cancel=false;g_error.clear();g_warning.clear();g_prepared=true;g_running=true;return 0;
 }
-int braw_export_start(BrawProjectHandle* project,const int* indices,int count,
-    int codec,int profile,int resolution,int rate,const char* outputDir,ExportProgressFn progress,void* context) {
+int braw_export_start_with_options(BrawProjectHandle* project,const int* indices,int count,
+    int codec,int profile,int resolution,int rate,int gopMode,int chromaMode,
+    const char* outputDir,ExportProgressFn progress,void* context) {
     {
         std::lock_guard lock(g_stateMutex);
         if(g_running.load()&&!g_prepared)return -1;
@@ -190,7 +200,7 @@ int braw_export_start(BrawProjectHandle* project,const int* indices,int count,
         g_prepared=false;
     }
     struct RunningGuard {~RunningGuard(){g_running=false;}} running;
-    if(!project||!indices||count<=0||codec<0||codec>2||profile<0||profile>5||resolution<0||resolution>6||rate<=0||rate>1000){setError("Invalid export settings.");return -1;}
+    if(!project||!indices||count<=0||codec<0||codec>2||profile<0||profile>5||resolution<0||resolution>6||rate<=0||rate>1000||gopMode<0||gopMode>1||chromaMode<0||chromaMode>1){setError("Invalid export settings.");return -1;}
     @autoreleasepool {
         std::vector<std::unique_ptr<ClipOwner>> clips;
         for(int i=0;i<count;i++) {
@@ -217,7 +227,7 @@ int braw_export_start(BrawProjectHandle* project,const int* indices,int count,
             }
             std::filesystem::path folder=outputDir&&outputDir[0]?std::filesystem::path(outputDir):source.parent_path();
             auto output=(folder/(source.stem().string()+".mov")).string();
-            if(!exportClip(clip,codec,profile,resolution,rate*1000000,output,progress,context,i,count)) {
+            if(!exportClip(clip,codec,profile,resolution,rate*1000000,gopMode,chromaMode,output,progress,context,i,count)) {
                 if(g_cancel.load())return -2;
                 std::string error=braw_export_last_error();
                 setError(source.filename().string()+" (clip "+std::to_string(i+1)+" of "+std::to_string(count)+"): "+error);
@@ -228,6 +238,11 @@ int braw_export_start(BrawProjectHandle* project,const int* indices,int count,
         if(exported==0&&!g_cancel.load()) {setError("No clips exported. "+std::string(braw_export_last_warning()));return -3;}
     }
     return g_cancel.load()?-2:0;
+}
+int braw_export_start(BrawProjectHandle* project,const int* indices,int count,
+    int codec,int profile,int resolution,int rate,const char* outputDir,ExportProgressFn progress,void* context) {
+    return braw_export_start_with_options(project,indices,count,codec,profile,resolution,rate,0,0,
+        outputDir,progress,context);
 }
 int braw_export_is_running(){return g_running.load();}
 void braw_export_cancel(){std::lock_guard lock(g_stateMutex);if(g_running.load())g_cancel=true;}

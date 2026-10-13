@@ -1086,9 +1086,9 @@ private final class ExportOperation: @unchecked Sendable {
         let indices = settings.selectedIndices.map { Int32($0) }
         let context = Unmanaged.passUnretained(self).toOpaque()
         let result = indices.withUnsafeBufferPointer { buffer in
-            braw_export_start(native.handle, buffer.baseAddress, Int32(buffer.count),
+            braw_export_start_with_options(native.handle, buffer.baseAddress, Int32(buffer.count),
                 Int32(settings.codec), Int32(settings.proResProfile), Int32(settings.resolutionMode),
-                Int32(settings.dataRateMbps), settings.outputDir, { ci, tc, frame, total, raw in
+                Int32(settings.dataRateMbps), Int32(settings.gopMode), Int32(settings.chromaMode), settings.outputDir, { ci, tc, frame, total, raw in
                     guard let raw else { return }
                     Unmanaged<ExportOperation>.fromOpaque(raw).takeUnretainedValue().progress(ci, tc, frame, total)
                 }, context)
@@ -1163,6 +1163,8 @@ struct ExportUISettings: Sendable {
     var proResProfile = 3
     var resolutionMode = 0
     var dataRateMbps = 200
+    var gopMode = 0
+    var chromaMode = 0
     var outputDir = ""
     var selectedIndices: [Int] = []
 }
