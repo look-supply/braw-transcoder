@@ -18,6 +18,9 @@ struct AdjustedThumbnailTests {
             paths.append(copy.path)
         }
         let project = ProjectModel()
+        project.selectAllClips()
+        precondition(project.selectedIndices.isEmpty && project.selectedIndex == -1,
+                     "Select All changed an empty project")
         _ = project.importClip(path: paths[0])
         _ = project.importClip(path: paths[1])
         let deadline = Date().addingTimeInterval(50)
@@ -34,6 +37,16 @@ struct AdjustedThumbnailTests {
         }
         try await waitUntil { !project.isImporting }
         precondition(project.importError == nil && project.clipCount == 2, "Import failed")
+        project.selectAllClips()
+        precondition(project.selectedIndices == [0, 1] && project.selectedIndex == 0,
+                     "Select All did not select every imported clip")
+        project.selectClip(1, toggling: true)
+        precondition(project.selectedIndices == [0], "Individual deselection after Select All failed")
+        project.isExporting = true
+        project.selectAllClips()
+        precondition(project.selectedIndices == [0], "Select All changed selection during export")
+        project.isExporting = false
+        project.selectClip(1)
         // Imports complete asynchronously; selection/export indices refer to
         // the actual project order, not the order tasks were submitted.
         paths = (0..<2).map { String(cString: braw_clip_get_filepath(braw_project_get_clip(project.projectHandle, Int32($0)))) } + [paths[2]]

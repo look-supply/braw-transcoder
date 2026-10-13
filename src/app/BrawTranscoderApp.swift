@@ -17,6 +17,16 @@ struct BrawTranscoderApp: App {
         }
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(after: .pasteboard) {
+                Button("Select All") {
+                    if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+                        editor.selectAll(nil)
+                    } else {
+                        project.selectAllClips()
+                    }
+                }
+                .keyboardShortcut("a", modifiers: .command)
+            }
             CommandGroup(after: .windowArrangement) {
                 Button(project.waveformVisible ? "Hide Waveform" : "Show Waveform") {
                     project.waveformVisible.toggle()

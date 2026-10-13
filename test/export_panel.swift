@@ -71,6 +71,15 @@ import SwiftUI
                 try await Task.sleep(for: .milliseconds(50))
                 window.setContentSize(NSSize(width: width, height: host.fittingSize.height))
                 host.layoutSubtreeIfNeeded()
+                let outputSwitch = descendants(host).compactMap { $0 as? NSSwitch }.first!
+                let outputFolder = descendants(host).compactMap { $0 as? NSTextField }
+                    .first { $0.placeholderString == "Choose output folder" }!
+                let switchBounds = outputSwitch.convert(outputSwitch.bounds, to: host)
+                let folderBounds = outputFolder.convert(outputFolder.bounds, to: host)
+                precondition(abs(switchBounds.midY - folderBounds.midY) < 3,
+                             "Output folder wrapped below the source toggle")
+                precondition(folderBounds.minX > switchBounds.maxX && folderBounds.maxX <= width - 11,
+                             "Output folder overlapped the toggle or overflowed the panel")
                 snapshot(host, "\(Int(width))-folder")
                 store.set(true, forKey: "exportUseSourceDirectory")
 

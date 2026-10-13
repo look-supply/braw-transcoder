@@ -90,15 +90,6 @@ struct InspectorView: View {
                 Image(systemName: "slider.horizontal.3").foregroundColor(.secondary)
                 Text("Inspector").font(.headline).foregroundColor(.secondary)
                 Spacer()
-                Menu {
-                    Button("Expand All") { expandedPanels = Set(InspectorPanel.allCases) }
-                    Button("Collapse All") { expandedPanels = [] }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .menuStyle(.borderlessButton).frame(width: 20)
-                .help("Expand or collapse Inspector sections")
-                .accessibilityLabel("Inspector sections")
             }
             .padding(.horizontal, 12)
             .frame(height: PanelLayout.headerHeight)

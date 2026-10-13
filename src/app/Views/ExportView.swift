@@ -54,17 +54,11 @@ struct ExportView: View {
         return "\(width) × \(height)" + (original ? " (original)" : "")
     }
 
-    var colorInfo: String {
-        guard let clip = project.selectedClip else { return "—" }
-        let parts = [clip.renderedGamma, clip.gamut, "Gen \(clip.colorScienceGen)"]
-        return parts.filter { !$0.isEmpty }.joined(separator: " · ")
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Label("Export", systemImage: "square.and.arrow.up")
+                    Text("Export")
                         .font(.headline).foregroundStyle(.secondary)
                     Spacer(minLength: 8)
                     if !exportMgr.isExporting, project.selectedClip != nil {
@@ -72,10 +66,6 @@ struct ExportView: View {
                             .font(.system(size: 11)).foregroundStyle(.blue)
                             .lineLimit(1)
                     }
-                }
-                if !exportMgr.isExporting, project.selectedClip != nil {
-                    Text(colorInfo).font(.system(size: 10)).foregroundStyle(.secondary)
-                        .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
@@ -111,24 +101,25 @@ struct ExportView: View {
                     }.layoutValue(key: ExportFieldWidth.self, value: 124)
 
                     ExportField(title: "Output") {
-                        HStack {
-                            Text("Same folder as BRAW").font(.system(size: 11)).lineLimit(1)
-                            Spacer(minLength: 8)
-                            Toggle("Same folder as BRAW", isOn: $useSourceDirectory)
+                        HStack(spacing: 8) {
+                            Text("Same as source").font(.system(size: 11)).fixedSize()
+                            Toggle("Same as source", isOn: $useSourceDirectory)
                                 .labelsHidden().toggleStyle(.switch).controlSize(.small).fixedSize()
-                                .accessibilityLabel("Same folder as BRAW")
-                        }.frame(minHeight: 22)
-                        if !useSourceDirectory {
-                            HStack(spacing: 8) {
+                                .accessibilityLabel("Same as source")
+                            if useSourceDirectory {
+                                Spacer(minLength: 0)
+                            } else {
                                 TextField("Choose output folder", text: $outputDir)
                                     .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                                    .lineLimit(1)
                                     .accessibilityLabel("Output folder")
                                 Button(action: pickOutputDir) { Image(systemName: "folder") }
                                     .buttonStyle(.bordered).controlSize(.small)
+                                    .fixedSize()
                                     .accessibilityLabel("Choose output folder")
                             }
-                        }
-                    }.layoutValue(key: ExportFieldWidth.self, value: 208)
+                        }.frame(minHeight: 22)
+                    }.layoutValue(key: ExportFieldWidth.self, value: useSourceDirectory ? 208 : 310)
 
                     VStack(spacing: 4) {
                         Text("Export actions").font(.system(size: 11, weight: .medium)).hidden()

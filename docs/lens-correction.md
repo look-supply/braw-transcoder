@@ -1,0 +1,9 @@
+# Lens correction
+
+The Inspector includes a Lens correction group containing Distortion correction, Shading correction and Chromatic aberration. The group is collapsible and starts collapsed. All three adjustments are unchecked by default, including on supported clips; Reset Adjustments turns them off. Unsupported settings are disabled and explained in the group.
+
+On the initial decoded frame, the worker queries each SDK clip-processing attribute range. A correction is adjustable only when the SDK reports a writable unsigned-16-bit range that includes both zero and one. The capability mask uses distortion=1, shading=2 and chromatic aberration=4. Native clip settings and copied adjustments are normalized to the destination capability mask. The worker rejects unsupported direct requests and checks every SDK setter result.
+
+Corrections are applied to cloned SDK clip-processing attributes before the decode-and-process job. Preview/thumbnail refresh updates the waveform, and the same flags reach native RGB16 exports for all codecs. MOV render metadata records each requested correction. No BRAW or sidecar files are modified.
+
+The CPU regression suite covers import defaults, capability propagation, unsupported requests, normalization, off/on/off decoding and export completion. Model checks cover copying, reset and supported defaults. Official samples and seven downloaded clips report no adjustable corrections; several Cinema Camera 6K clips in the Summer 2026 footage report all three writable controls. Off/on tests on those clips, including native-resolution decoding, returned identical pixels. Thus SDK integration is verified, but a visible correction is not yet confirmed with the available lens data. A clip with a known visible correction in Resolve is needed to finish visual validation.

@@ -115,6 +115,11 @@ struct PreviewHeader: View {
     @ObservedObject var clip: ClipModel
     let isExporting: Bool
 
+    private var colorInfo: String {
+        [clip.renderedGamma, clip.gamut, "Gen \(clip.colorScienceGen)"]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
     private var details: some View {
         HStack(spacing: 6) {
             Text(clip.fileName).font(.system(size: 12, weight: .medium))
@@ -123,6 +128,10 @@ struct PreviewHeader: View {
             Text("\(clip.renderDimensions.width)×\(clip.renderDimensions.height) · \(String(format: "%.2f", clip.frameRate)) fps")
                 .font(.system(size: 10)).foregroundStyle(.secondary)
                 .fixedSize()
+            Text("· \(colorInfo)")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.tail)
+                .help(colorInfo)
         }
     }
     private var modes: some View {

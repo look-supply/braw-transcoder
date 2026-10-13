@@ -298,6 +298,7 @@ private struct StableClipListScrollbar: NSViewRepresentable {
                 guard let scrollView = self?.enclosingScrollView else { return }
                 scrollView.scrollerStyle = .legacy
                 scrollView.hasVerticalScroller = true
+                scrollView.verticalScroller?.controlSize = .mini
                 scrollView.hasHorizontalScroller = false
                 scrollView.autohidesScrollers = false
             }

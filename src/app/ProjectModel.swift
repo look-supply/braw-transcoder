@@ -617,6 +617,13 @@ final class ProjectModel: ObservableObject {
         updatePreviewSelection()
     }
 
+    func selectAllClips() {
+        guard !isExporting, !isImporting, clipCount > 0 else { return }
+        selectedIndices = Set(0..<clipCount)
+        selectionAnchor = 0
+        updatePreviewSelection()
+    }
+
     private func updatePreviewSelection() {
         let first = selectedIndices.min() ?? -1
         guard first != selectedIndex, let h = projectHandle else { return }
