@@ -4,7 +4,7 @@ import CoreGraphics
 
 // Native ownership is confined to these wrappers. The bridge serializes access
 // with native mutexes, and queued work retains its wrapper until completion.
-private struct DecodedPixels: Sendable {
+struct DecodedPixels: Sendable {
     let data: Data
     let width: Int
     let height: Int
@@ -14,6 +14,64 @@ private struct DecodeResult: Sendable {
     var waveform: RGBWaveform?
     var falseColorPixels: DecodedPixels?
     var error: String = ""
+    var usesMetal = false
+}
+private final class NativeFrameBuffer: @unchecked Sendable {
+    let handle: OpaquePointer
+    init(_ handle: OpaquePointer) { self.handle = handle }
+    deinit { braw_frame_buffer_free(handle) }
+}
+
+private struct BufferedPlaybackFrame: Sendable {
+    let index: UInt64
+    let result: DecodeResult
+}
+
+/// A bounded read-ahead queue separates variable decode times from presentation.
+@MainActor private final class PlaybackFrameQueue {
+    private var frames: [BufferedPlaybackFrame] = []
+    private var reader: CheckedContinuation<BufferedPlaybackFrame?, Never>?
+    private var writer: CheckedContinuation<Void, Never>?
+    private var prefill: CheckedContinuation<Void, Never>?
+    private var closed = false
+    private let initialCount: Int
+    init(remaining: UInt64) { initialCount = Int(min(3, remaining)) }
+    var firstIndex: UInt64? { frames.first?.index }
+
+    func waitForPrefill() async {
+        if closed || frames.count >= initialCount { return }
+        await withCheckedContinuation { prefill = $0 }
+    }
+    func push(_ frame: BufferedPlaybackFrame) async -> Bool {
+        while !closed && frames.count >= 3 {
+            await withCheckedContinuation { writer = $0 }
+        }
+        guard !closed else { return false }
+        if let reader {
+            self.reader = nil
+            reader.resume(returning: frame)
+        } else { frames.append(frame) }
+        if frames.count >= initialCount {
+            prefill?.resume(); prefill = nil
+        }
+        return true
+    }
+    func pop() async -> BufferedPlaybackFrame? {
+        if !frames.isEmpty {
+            let frame = frames.removeFirst()
+            writer?.resume(); writer = nil
+            return frame
+        }
+        guard !closed else { return nil }
+        return await withCheckedContinuation { reader = $0 }
+    }
+    func finish(discard: Bool = false) {
+        closed = true
+        if discard { frames.removeAll() }
+        reader?.resume(returning: nil); reader = nil
+        writer?.resume(); writer = nil
+        prefill?.resume(); prefill = nil
+    }
 }
 private final class NativeClip: @unchecked Sendable {
     let handle: OpaquePointer
@@ -21,6 +79,7 @@ private final class NativeClip: @unchecked Sendable {
     private let lock = NSLock()
     private var latestRequest: UInt64 = 0
     private var latestThumbnailRequest: UInt64 = 0
+    private let profilesPlayback = ProcessInfo.processInfo.environment["BRAW_PROFILE_PLAYBACK"] == "1"
     init(retainedHandle: OpaquePointer) { handle = retainedHandle }
     deinit { braw_clip_close(handle) }
     func setLatest(_ request: UInt64) { lock.withLock { latestRequest = request } }
@@ -39,18 +98,31 @@ private final class NativeClip: @unchecked Sendable {
                     continuation.resume(returning: DecodeResult()); return
                 }
                 var width: Int32 = 0, height: Int32 = 0
+                let profileStart = ProcessInfo.processInfo.systemUptime
+                let buffer = mode.flatMap { braw_clip_decode_monitor_buffer(handle, index, &width, &height, scale, $0 != .embeddedLUT) }
+                let owner = buffer.map { NativeFrameBuffer($0) }
                 let decoded = mode == nil
                     ? braw_clip_decode_frame_scaled(handle, index, &width, &height, scale)
-                    : braw_clip_decode_monitor_frame(handle, index, &width, &height, scale, mode != .embeddedLUT)
+                    : buffer.flatMap { braw_frame_buffer_data($0).map { UnsafeMutablePointer(mutating: $0) } }
                 guard let pixels = decoded else {
                     continuation.resume(returning: DecodeResult(error: String(cString: braw_clip_last_error(handle)))); return
                 }
-                defer { braw_clip_free_frame(pixels) }
+                let decodeFinished = ProcessInfo.processInfo.systemUptime
+                defer { if mode == nil { braw_clip_free_frame(pixels) } }
                 guard width > 0, height > 0 else {
                     continuation.resume(returning: DecodeResult(error: "Decoder returned an invalid image.")); return
                 }
-                let frame = DecodedPixels(data: Data(bytes: pixels, count: Int(width) * Int(height) * 4),
-                                          width: Int(width), height: Int(height))
+                let count = Int(width) * Int(height) * 4
+                let data: Data
+                if let owner {
+                    data = Data(bytesNoCopy: pixels, count: count, deallocator: .custom { [owner] _, _ in
+                        withExtendedLifetime(owner) {}
+                    })
+                } else { data = Data(bytes: pixels, count: count) }
+                let frame = DecodedPixels(data: data, width: Int(width), height: Int(height))
+                if profilesPlayback, index % 24 == 0 {
+                    print("Playback profile frame \(index): decode/IPC \((decodeFinished - profileStart) * 1000) ms; frame wrapping \((ProcessInfo.processInfo.systemUptime - decodeFinished) * 1000) ms")
+                }
                 if isStale() {
                     continuation.resume(returning: DecodeResult()); return
                 }
@@ -59,12 +131,35 @@ private final class NativeClip: @unchecked Sendable {
                 let falsePixels = falseColor
                     ? FalseColor.render(bgra: frame.data, width: frame.width, height: frame.height)
                         .map { DecodedPixels(data: $0, width: frame.width, height: frame.height) } : nil
-                continuation.resume(returning: DecodeResult(pixels: frame, waveform: waveform, falseColorPixels: falsePixels))
+                continuation.resume(returning: DecodeResult(pixels: frame, waveform: waveform,
+                    falseColorPixels: falsePixels, usesMetal: braw_clip_using_metal(handle)))
             }
         }
     }
     func releaseDecoder() {
         queue.async { [self] in braw_clip_release_decoder(handle) }
+    }
+    func audioInfo() async -> PlaybackAudioFormat? {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                let info = braw_clip_get_audio_info(handle)
+                continuation.resume(returning: info.rate > 0 && info.channels > 0 && info.samples > 0
+                    ? PlaybackAudioFormat(rate: info.rate, channels: info.channels, bits: info.bits, samples: info.samples) : nil)
+            }
+        }
+    }
+    func audioSamples(start: UInt64, count: UInt32, bits: UInt32) async -> [Float]? {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                var byteCount: UInt32 = 0
+                guard let bytes = braw_clip_read_audio(handle, start, count, &byteCount) else {
+                    continuation.resume(returning: nil); return
+                }
+                defer { braw_clip_free_frame(bytes) }
+                let data = Data(bytes: bytes, count: Int(byteCount))
+                continuation.resume(returning: PlaybackPCM.floats(data, bits: bits))
+            }
+        }
     }
     func saveEmbeddedLUT(to path: String) async -> String? {
         await withCheckedContinuation { continuation in
@@ -202,8 +297,34 @@ final class ClipModel: Identifiable, ObservableObject {
         set { if newValue != previewMode { previewLUT = newValue == .embeddedLUT } }
     }
     @Published var currentFrame: UInt64 = 0 {
-        didSet { loadPreviewFrame() }
+        didSet {
+            guard !isPresentingPlaybackFrame else { return }
+            stopPlayback(refreshPreview: false)
+            loadPreviewFrame()
+        }
     }
+
+    @Published private(set) var isPlaying = false
+    @Published private(set) var playbackDirection: PlaybackDirection = .forward
+    var onPlaybackFinished: ((ClipModel, PlaybackDirection) -> Void)?
+    @Published private(set) var playbackFrame: DecodedPixels?
+    @Published private(set) var playbackUsesMetal = false
+    private var playbackTask: Task<Void, Never>?
+    private var playbackProducer: Task<Void, Never>?
+    private var playbackFrames: PlaybackFrameQueue?
+    private var playbackAudio: PlaybackAudio?
+    var playbackAudioIsPlaying: Bool { playbackAudio?.isPlaying == true }
+    var playbackAudioElapsed: Double? { playbackAudio?.elapsed }
+    var playbackWaveformEnabled = false
+    var playbackResolution: PlaybackResolution = .full {
+        didSet {
+            guard playbackResolution != oldValue, isPlaying else { return }
+            stopPlayback(refreshPreview: false)
+            startPlayback()
+        }
+    }
+    private var playbackGeneration: UInt64 = 0
+    private var isPresentingPlaybackFrame = false
 
     @Published var thumbnail: NSImage? = nil
     @Published private(set) var isLoadingThumbnail = false
@@ -335,6 +456,8 @@ final class ClipModel: Identifiable, ObservableObject {
     var frameCount: UInt64   { handle.map { braw_clip_get_frame_count($0) } ?? 0 }
 
     func releaseDecoder() {
+        stopPlayback(refreshPreview: false)
+        playbackFrame = nil
         isPreviewActive = false
         loadRequestID += 1
         native.setLatest(loadRequestID)
@@ -482,6 +605,7 @@ final class ClipModel: Identifiable, ObservableObject {
     }
 
     func schedulePreviewRefresh() {
+        stopPlayback(refreshPreview: false)
         isLoadingPreview = isPreviewActive
         loadRequestID += 1
         native.setLatest(loadRequestID)
@@ -500,6 +624,7 @@ final class ClipModel: Identifiable, ObservableObject {
     }
 
     func loadPreviewFrame() {
+        stopPlayback(refreshPreview: false)
         isPreviewActive = true
         isLoadingPreview = true
         previewError = nil
@@ -517,9 +642,173 @@ final class ClipModel: Identifiable, ObservableObject {
             guard let self, self.loadRequestID == requestID else { return }
             self.isLoadingPreview = false
             self.waveform = result.waveform
-            if let pixels = result.falseColorPixels ?? result.pixels { self.preview = makeNSImageBGRA(frame: pixels) }
+            if let pixels = result.falseColorPixels ?? result.pixels {
+                self.preview = makeNSImageBGRA(frame: pixels)
+                self.playbackFrame = nil
+            }
             else if !result.error.isEmpty { self.previewError = result.error }
         }
+    }
+
+    func togglePlayback(direction: PlaybackDirection? = nil) {
+        let desired = direction ?? playbackDirection
+        if isPlaying && desired == playbackDirection { stopPlayback() }
+        else {
+            stopPlayback(refreshPreview: false)
+            startPlayback(direction: desired)
+        }
+    }
+
+    func startPlayback(direction desired: PlaybackDirection? = nil) {
+        guard !isPlaying, frameCount > 0, frameRate.isFinite, frameRate > 0 else { return }
+        let direction = desired ?? playbackDirection
+        playbackDirection = direction
+        let refreshThumbnail = pendingRefresh != nil
+        pendingRefresh?.cancel()
+        pendingRefresh = nil
+        if refreshThumbnail { loadThumbnail(force: true) }
+        loadRequestID += 1
+        let requestID = loadRequestID
+        native.setLatest(requestID)
+        playbackGeneration += 1
+        let generation = playbackGeneration
+        isPresentingPlaybackFrame = true
+        if direction == .forward && currentFrame >= frameCount - 1 { currentFrame = 0 }
+        if direction == .reverse && currentFrame == 0 { currentFrame = frameCount - 1 }
+        isPresentingPlaybackFrame = false
+        let firstFrame = currentFrame
+        let count = frameCount
+        let remaining = direction == .forward ? count - firstFrame : firstFrame + 1
+        let fps = Double(frameRate)
+        let scale = playbackResolution.scale
+        let mode = previewMode
+        let falseColor = falseColorEnabled
+        isPreviewActive = true
+        isPlaying = true
+        isLoadingPreview = false
+        previewError = nil
+        playbackTask = Task { [weak self, native] in
+            let audioFormat = await native.audioInfo()
+            guard let self, self.isPlaying, self.playbackGeneration == generation, !Task.isCancelled else { return }
+            do {
+                if let audioFormat {
+                    self.playbackAudio = try PlaybackAudio(source: audioFormat, firstFrame: firstFrame, fps: fps, direction: direction)
+                }
+            } catch {
+                self.stopPlayback(refreshPreview: false)
+                self.previewError = "Could not start audio playback: \(error.localizedDescription)"
+                return
+            }
+            let frames = PlaybackFrameQueue(remaining: remaining)
+            self.playbackFrames = frames
+            self.playbackProducer = Task { [weak self, native] in
+                var lastWaveformTime = -Double.infinity
+                for offset in 0..<remaining {
+                    let next = direction == .forward ? firstFrame + offset : firstFrame - offset
+                    guard let self, self.isPlaying, self.playbackGeneration == generation, !Task.isCancelled else { return }
+                    do {
+                        if let interruption = self.playbackAudio?.interruption { throw interruption }
+                        while let audio = self.playbackAudio, audio.needsBuffer {
+                            let samples = await native.audioSamples(start: audio.readStart, count: audio.nextCount, bits: audio.source.bits)
+                            guard self.isPlaying, self.playbackGeneration == generation, !Task.isCancelled else { return }
+                            if let interruption = audio.interruption { throw interruption }
+                            guard let samples else { throw PlaybackAudio.AudioError.readFailed }
+                            try audio.schedule(samples)
+                        }
+                    } catch {
+                        _ = await frames.push(BufferedPlaybackFrame(index: next, result: DecodeResult(error: error.localizedDescription)))
+                        frames.finish()
+                        return
+                    }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    let analyze = self.playbackWaveformEnabled && now - lastWaveformTime >= 0.2
+                    let result = await native.decode(index: next, scale: scale, request: requestID,
+                                                     analyzeWaveform: analyze, mode: mode, falseColor: falseColor)
+                    guard self.isPlaying, self.playbackGeneration == generation, !Task.isCancelled else { return }
+                    if analyze { lastWaveformTime = ProcessInfo.processInfo.systemUptime }
+                    guard await frames.push(BufferedPlaybackFrame(index: next, result: result)) else { return }
+                    if result.pixels == nil { break }
+                }
+                frames.finish()
+            }
+            await frames.waitForPrefill()
+            let timeline = PlaybackTimeline(firstFrame: firstFrame, frameCount: count, fps: fps, direction: direction)
+            var startedAt: Double?
+            while var frame = await frames.pop() {
+                guard self.isPlaying, self.playbackGeneration == generation, !Task.isCancelled else { return }
+                if let startedAt {
+                    let elapsed = self.playbackAudio?.elapsed ?? (ProcessInfo.processInfo.systemUptime - startedAt)
+                    let due = timeline.frame(at: elapsed)
+                    while (direction == .forward ? frame.index < due : frame.index > due),
+                          let next = frames.firstIndex, (direction == .forward ? next <= due : next >= due),
+                          let newer = await frames.pop() { frame = newer }
+                }
+                if let interruption = self.playbackAudio?.interruption {
+                    self.stopPlayback(refreshPreview: false)
+                    self.previewError = interruption.localizedDescription
+                    return
+                }
+                let result = frame.result
+                let next = frame.index
+                let offset = direction == .forward ? next - firstFrame : firstFrame - next
+                guard let pixels = result.falseColorPixels ?? result.pixels else {
+                    self.stopPlayback(refreshPreview: false)
+                    self.previewError = result.error.isEmpty ? "Could not decode playback frame." : result.error
+                    return
+                }
+                // Decode ahead of the presentation deadline, then wait for the
+                // audio clock. Decoder work must not add latency to every frame.
+                if let startedAt {
+                    let elapsed = self.playbackAudio?.elapsed ?? (ProcessInfo.processInfo.systemUptime - startedAt)
+                    let delay = max(0, Double(offset) / fps - elapsed)
+                    if delay > 0 {
+                        do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                    }
+                    guard self.isPlaying, self.playbackGeneration == generation else { return }
+                }
+                let presentedAt = ProcessInfo.processInfo.systemUptime
+                if startedAt == nil {
+                    startedAt = presentedAt
+                    self.playbackAudio?.play()
+                }
+                self.playbackFrame = pixels
+                self.playbackUsesMetal = result.usesMetal
+                self.isPresentingPlaybackFrame = true
+                self.currentFrame = next
+                self.isPresentingPlaybackFrame = false
+                if let waveform = result.waveform { self.waveform = waveform }
+                if offset == remaining - 1 {
+                    let elapsed = self.playbackAudio?.elapsed ?? (ProcessInfo.processInfo.systemUptime - startedAt!)
+                    let delay = max(0, Double(offset + 1) / fps - elapsed)
+                    if delay > 0 {
+                        do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                    }
+                    guard self.isPlaying, self.playbackGeneration == generation else { return }
+                    self.stopPlayback(refreshPreview: false)
+                    if let finished = self.onPlaybackFinished { finished(self, direction) }
+                    else { self.loadPreviewFrame() }
+                    return
+                }
+            }
+        }
+    }
+
+    func stopPlayback(refreshPreview: Bool = true) {
+        guard isPlaying else { return }
+        isPlaying = false
+        playbackGeneration += 1
+        playbackTask?.cancel()
+        playbackTask = nil
+        playbackProducer?.cancel()
+        playbackProducer = nil
+        playbackFrames?.finish(discard: true)
+        playbackFrames = nil
+        playbackAudio?.stop()
+        playbackAudio = nil
+        loadRequestID += 1
+        native.setLatest(loadRequestID)
+        if let playbackFrame { preview = makeNSImageBGRA(frame: playbackFrame) }
+        if refreshPreview { loadPreviewFrame() }
     }
 }
 
@@ -549,11 +838,31 @@ struct StoredAdjustments {
 @MainActor
 final class ProjectModel: ObservableObject {
     private let native = NativeProject()
+    private let preferences: UserDefaults
+    @Published var playbackLoopEnabled: Bool {
+        didSet { preferences.set(playbackLoopEnabled, forKey: "playbackLoopEnabled") }
+    }
+    @Published var playbackResolution: PlaybackResolution {
+        didSet {
+            guard playbackResolution != oldValue else { return }
+            preferences.set(playbackResolution.rawValue, forKey: "playbackResolution")
+            for clip in clipCache.values { clip.playbackResolution = playbackResolution }
+        }
+    }
+
+    init(preferences: UserDefaults = .standard) {
+        self.preferences = preferences
+        playbackLoopEnabled = preferences.bool(forKey: "playbackLoopEnabled")
+        playbackResolution = PlaybackResolution(rawValue: preferences.string(forKey: "playbackResolution") ?? "") ?? .full
+    }
     fileprivate var nativeOwner: NativeProject { native }
     func releaseDecoders() { for clip in clipCache.values { clip.releaseDecoder() } }
     var projectHandle: OpaquePointer? { native.handle }
     @Published var waveformVisible = UserDefaults.standard.bool(forKey: "waveformVisible") {
-        didSet { UserDefaults.standard.set(waveformVisible, forKey: "waveformVisible") }
+        didSet {
+            UserDefaults.standard.set(waveformVisible, forKey: "waveformVisible")
+            selectedClip?.playbackWaveformEnabled = waveformVisible
+        }
     }
     @Published var clipCount = 0
     @Published var selectedIndex = -1
@@ -630,6 +939,7 @@ final class ProjectModel: ObservableObject {
         getClip(at: selectedIndex)?.releaseDecoder()
         braw_project_set_selected_index(h, Int32(first))
         selectedIndex = first
+        getClip(at: first)?.playbackWaveformEnabled = waveformVisible
         getClip(at: first)?.loadPreviewFrame()
     }
 
@@ -638,8 +948,46 @@ final class ProjectModel: ObservableObject {
         if let cached = clipCache[index] { return cached }
         guard let ch = braw_project_get_clip_retained(h, Int32(index)) else { return nil }
         let model = ClipModel(id: index, handle: ch)
+        model.playbackResolution = playbackResolution
+        model.onPlaybackFinished = { [weak self] clip, direction in
+            self?.playbackDidFinish(clip, direction: direction)
+        }
         clipCache[index] = model
         return model
+    }
+
+    func navigatePlaybackClip(by offset: Int) {
+        guard !isExporting, !isImporting, let current = selectedClip else { return }
+        let next = selectedIndex + offset
+        guard next >= 0, next < clipCount else { return }
+        let wasPlaying = current.isPlaying
+        let direction = current.playbackDirection
+        selectClip(next)
+        guard let clip = selectedClip else { return }
+        clip.currentFrame = direction == .forward ? 0 : max(clip.frameCount, 1) - 1
+        if wasPlaying { clip.startPlayback(direction: direction) }
+    }
+
+    func stopAndRewindPlayback() {
+        guard !isExporting, !isImporting, let clip = selectedClip else { return }
+        clip.stopPlayback(refreshPreview: false)
+        clip.currentFrame = 0
+    }
+
+    private func playbackDidFinish(_ finished: ClipModel, direction: PlaybackDirection) {
+        guard selectedClip === finished, !isExporting, !isImporting else { return }
+        if playbackLoopEnabled {
+            finished.startPlayback(direction: direction)
+            return
+        }
+        let next = selectedIndex + (direction == .forward ? 1 : -1)
+        if next >= 0 && next < clipCount {
+            selectClip(next)
+            if let clip = selectedClip {
+                clip.currentFrame = direction == .forward ? 0 : max(clip.frameCount, 1) - 1
+                clip.startPlayback(direction: direction)
+            }
+        } else { finished.loadPreviewFrame() }
     }
 
     func copySettings(from index: Int) {
@@ -814,7 +1162,7 @@ struct ExportUISettings: Sendable {
 // ── Image helpers (CPU decode → NSImage) ──────────
 
 @MainActor
-private func makeNSImageBGRA(frame: DecodedPixels) -> NSImage? {
+func makeNSImageBGRA(frame: DecodedPixels) -> NSImage? {
     let bytesPerRow = frame.width * 4
     guard let provider = CGDataProvider(data: frame.data as CFData) else { return nil }
     let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue

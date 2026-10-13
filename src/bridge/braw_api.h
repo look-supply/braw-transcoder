@@ -101,7 +101,13 @@ BrawClipSettings braw_clip_get_settings(BrawClipHandle* h);
 uint8_t* braw_clip_decode_frame(BrawClipHandle* h, uint64_t index, int* w, int* outH);
 uint8_t* braw_clip_decode_frame_scaled(BrawClipHandle* h, uint64_t index, int* w, int* outH, float scale);
 uint8_t* braw_clip_decode_monitor_frame(BrawClipHandle* h, uint64_t index, int* w, int* outH, float scale, bool logSignal);
+typedef struct BrawFrameBuffer BrawFrameBuffer;
+// Immutable owned pixels: valid until braw_frame_buffer_free, across subsequent decodes.
+BrawFrameBuffer* braw_clip_decode_monitor_buffer(BrawClipHandle* h, uint64_t index, int* w, int* outH, float scale, bool logSignal);
+const uint8_t* braw_frame_buffer_data(BrawFrameBuffer* frame);
+void braw_frame_buffer_free(BrawFrameBuffer* frame);
 void     braw_clip_free_frame(uint8_t* data);
+bool     braw_clip_using_metal(BrawClipHandle* h);
 
 // Audio extraction: returns PCM float samples (caller frees with free())
 float*   braw_clip_extract_audio(BrawClipHandle* h, uint32_t* sampleRate,
@@ -109,6 +115,10 @@ float*   braw_clip_extract_audio(BrawClipHandle* h, uint32_t* sampleRate,
 // Audio format query without extracting.
 bool     braw_clip_get_audio_format(BrawClipHandle* h, uint32_t* sampleRate,
                                      uint32_t* channels);
+typedef struct { uint32_t rate, channels, bits; uint64_t samples; } BrawAudioInfo;
+BrawAudioInfo braw_clip_get_audio_info(BrawClipHandle* h);
+// Read at most 65536 sample frames. Caller frees the raw signed little-endian PCM.
+uint8_t* braw_clip_read_audio(BrawClipHandle* h, uint64_t start, uint32_t count, uint32_t* byteCount);
 
 // ── Project API ──────────────────────────────────
 BrawProjectHandle* braw_project_create(void);

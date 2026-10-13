@@ -25,7 +25,10 @@ struct MonitoringTests {
             else { defaults.removeObject(forKey: "waveformVisible") }
         }
         defaults.removeObject(forKey: "waveformVisible")
-        let project = ProjectModel()
+        let suite = "braw-monitoring-test-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let project = ProjectModel(preferences: preferences)
         precondition(!project.waveformVisible, "Waveform should start hidden")
         project.waveformVisible = true
         precondition(ProjectModel().waveformVisible, "Waveform state did not survive recreation")
@@ -89,6 +92,7 @@ struct MonitoringTests {
         try await wait { !clip.isLoadingPreview && !clip.isLoadingThumbnail }
         precondition(pixels(clip.preview) == logPixels, "Rapid changes displayed stale false color")
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap { descendants($0) } }
+        project.playbackLoopEnabled = true
         for width: CGFloat in [400, 500, 900] {
             let view = NSHostingView(rootView: PreviewView(project: project))
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)

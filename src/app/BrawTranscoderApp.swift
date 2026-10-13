@@ -17,6 +17,27 @@ struct BrawTranscoderApp: App {
         }
         .windowResizability(.contentMinSize)
         .commands {
+            CommandMenu("Playback") {
+                Button("Play/Pause") {
+                    if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+                        editor.insertText(" ", replacementRange: editor.selectedRange())
+                    } else {
+                        project.selectedClip?.togglePlayback()
+                    }
+                }
+                .keyboardShortcut(.space, modifiers: [])
+                .disabled(project.isExporting || project.isImporting || (project.selectedClip?.frameCount ?? 0) == 0)
+                Divider()
+                Toggle("Loop Clip", isOn: $project.playbackLoopEnabled)
+                Menu("Resolution") {
+                    Picker("Playback Resolution", selection: $project.playbackResolution) {
+                        ForEach(PlaybackResolution.allCases) { resolution in
+                            Text(resolution.label).tag(resolution)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                }
+            }
             CommandGroup(after: .pasteboard) {
                 Button("Select All") {
                     if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {

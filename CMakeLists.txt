@@ -61,6 +61,7 @@ add_executable(${PROJECT_NAME}
     src/app/Views/ContentView.swift
     src/app/Views/SidebarView.swift
     src/app/Views/PreviewView.swift
+    src/app/Views/MetalPlaybackView.swift
     src/app/Views/InspectorView.swift
     src/app/Views/NumericSlider.swift
     src/app/Views/RGBWaveformView.swift
@@ -78,6 +79,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     braw_core
     "-framework AppKit"
     "-framework SwiftUI"
+    "-framework MetalKit"
+    "-framework Metal"
 )
 
 target_compile_options(${PROJECT_NAME} PRIVATE
@@ -160,13 +163,32 @@ target_compile_options(braw_export_panel_test PRIVATE
 target_link_libraries(braw_export_panel_test PRIVATE braw_core "-framework AppKit" "-framework SwiftUI" "-framework CoreFoundation")
 add_dependencies(braw_export_panel_test braw_worker)
 add_executable(braw_preview_monitoring_test test/preview_monitoring.swift src/app/ProjectModel.swift
-    src/app/RGBWaveform.swift src/app/PreviewMonitoring.swift src/app/Views/PreviewView.swift)
+    src/app/RGBWaveform.swift src/app/PreviewMonitoring.swift src/app/Views/PreviewView.swift src/app/Views/MetalPlaybackView.swift)
 target_include_directories(braw_preview_monitoring_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(braw_preview_monitoring_test PRIVATE
     "SHELL:-import-objc-header ${CMAKE_SOURCE_DIR}/src/bridge/braw_api.h")
-target_link_libraries(braw_preview_monitoring_test PRIVATE braw_core "-framework AppKit" "-framework SwiftUI" "-framework CoreFoundation")
+target_link_libraries(braw_preview_monitoring_test PRIVATE braw_core "-framework AppKit" "-framework SwiftUI" "-framework CoreFoundation" "-framework MetalKit" "-framework Metal")
 add_dependencies(braw_preview_monitoring_test braw_worker)
+foreach(playback_target BrawTranscoder braw_model_test braw_export_panel_test braw_preview_monitoring_test)
+    target_sources(${playback_target} PRIVATE src/app/PlaybackAudio.swift)
+    target_link_libraries(${playback_target} PRIVATE "-framework AVFoundation")
+endforeach()
+
+add_executable(braw_playback_test test/playback.swift src/app/ProjectModel.swift
+    src/app/PlaybackAudio.swift src/app/RGBWaveform.swift src/app/PreviewMonitoring.swift
+    src/app/Views/MetalPlaybackView.swift src/app/Views/PreviewView.swift
+    src/app/Views/ContentView.swift src/app/Views/SidebarView.swift src/app/Views/InspectorView.swift
+    src/app/Views/NumericSlider.swift src/app/Views/RGBWaveformView.swift src/app/Views/ExportView.swift
+    src/app/Views/ExportControlsLayout.swift src/app/Views/FullWidthDropdown.swift)
+target_include_directories(braw_playback_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(braw_playback_test PRIVATE
+    "SHELL:-import-objc-header ${CMAKE_SOURCE_DIR}/src/bridge/braw_api.h")
+target_link_libraries(braw_playback_test PRIVATE braw_core "-framework AppKit" "-framework SwiftUI"
+    "-framework AVFoundation" "-framework MetalKit" "-framework Metal")
+add_dependencies(braw_playback_test braw_worker)
 if(EXISTS "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    add_test(NAME playback COMMAND braw_playback_test "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    set_tests_properties(playback PROPERTIES TIMEOUT 60)
     add_test(NAME preview_monitoring COMMAND braw_preview_monitoring_test "${BRAW_SDK_ROOT}/../Media/sample.braw")
     set_tests_properties(preview_monitoring PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 60)
     add_test(NAME export_panel COMMAND braw_export_panel_test "${BRAW_SDK_ROOT}/../Media/sample.braw")

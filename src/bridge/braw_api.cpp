@@ -294,6 +294,31 @@ uint8_t* braw_clip_decode_monitor_frame(BrawClipHandle* h, uint64_t index, int* 
 
 void braw_clip_free_frame(uint8_t* data) { free(data); }
 
+struct BrawFrameBuffer { std::vector<uint8_t> pixels; };
+BrawFrameBuffer* braw_clip_decode_monitor_buffer(BrawClipHandle* h, uint64_t index, int* w, int* outH, float scale, bool logSignal) {
+    if (!h || !w || !outH) return nullptr;
+    std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
+    ensureDecoder(h);
+    ClipAdjustments adjustments;
+    { std::lock_guard settingsLock(h->settingsMutex); adjustments=h->adjustments; }
+    adjustments.monitoringLog=logSignal;
+    if(logSignal) { adjustments.previewLUT=false; adjustments.toneCurveEnabled=false; }
+    if(!h->decoderOpen) { h->lastError=h->decoder->LastError(); return nullptr; }
+    int stride=0;
+    auto pixels=h->decoder->DecodeFrameSync(index,w,outH,&stride,adjustments,scale);
+    h->lastError=h->decoder->LastError();
+    if(pixels.empty())return nullptr;
+    return new BrawFrameBuffer{std::move(pixels)};
+}
+const uint8_t* braw_frame_buffer_data(BrawFrameBuffer* frame) { return frame?frame->pixels.data():nullptr; }
+void braw_frame_buffer_free(BrawFrameBuffer* frame) { delete frame; }
+
+bool braw_clip_using_metal(BrawClipHandle* h) {
+    if (!h) return false;
+    std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
+    return h->decoderOpen && h->decoder->UsingMetal();
+}
+
 // Diagnostic logging from Swift
 extern "C" void braw_diag_log(const char* msg) {
     fprintf(stderr, "DIAG: %s\n", msg ? msg : "null");
@@ -319,6 +344,37 @@ float* braw_clip_extract_audio(BrawClipHandle* h, uint32_t* sr, uint32_t* ch, ui
     std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
     ensureDecoder(h);
     return h->decoderOpen ? h->decoder->ExtractAudio(sr, ch, sc) : nullptr;
+}
+
+BrawAudioInfo braw_clip_get_audio_info(BrawClipHandle* h) {
+    if (!h) return {};
+    std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
+    ensureDecoder(h);
+    if (!h->decoderOpen) return {};
+    auto info = h->decoder->GetAudioInfo();
+    return {info.rate, info.channels, info.bits, info.samples};
+}
+
+uint8_t* braw_clip_read_audio(BrawClipHandle* h, uint64_t start, uint32_t count, uint32_t* byteCount) {
+    if (byteCount) *byteCount = 0;
+    if (!h || !byteCount || !count || count > 65536) return nullptr;
+    std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
+    ensureDecoder(h);
+    if (!h->decoderOpen) return nullptr;
+    const auto info = h->decoder->GetAudioInfo();
+    if (start >= info.samples || (info.bits != 16 && info.bits != 24 && info.bits != 32)) return nullptr;
+    count = uint32_t(std::min<uint64_t>(count, info.samples - start));
+    std::vector<uint8_t> bytes;
+    if (!h->decoder->ReadAudio(start, count, bytes) ||
+        bytes.size() != uint64_t(count) * info.channels * (info.bits / 8)) {
+        h->lastError = "Could not read playback audio samples.";
+        return nullptr;
+    }
+    auto* output = static_cast<uint8_t*>(malloc(bytes.size()));
+    if (!output) { h->lastError = "Unable to allocate playback audio."; return nullptr; }
+    memcpy(output, bytes.data(), bytes.size());
+    *byteCount = uint32_t(bytes.size());
+    return output;
 }
 
 // ── Project API ──────────────────────────────────

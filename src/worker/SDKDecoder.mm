@@ -392,7 +392,8 @@ bool SDKDecoder::Open(const std::string& path,bool metal,int format) {
         p.device=MTLCreateSystemDefaultDevice(); p.queue=[p.device newCommandQueue];
         hr=p.device&&p.queue?config->SetPipeline(blackmagicRawPipelineMetal,(__bridge void*)p.device,(__bridge void*)p.queue):E_FAIL;
     } else hr=config->SetPipeline(blackmagicRawPipelineCPU,nullptr,nullptr);
-    config->SetCPUThreads(4); config->Release(); if(FAILED(hr)){fprintf(stderr,"SetPipeline failed: 0x%x\n",unsigned(hr));return false;}
+    // Let the SDK choose the CPU parallelism for decompression feeding Metal.
+    config->SetCPUThreads(0); config->Release(); if(FAILED(hr)){fprintf(stderr,"SetPipeline failed: 0x%x\n",unsigned(hr));return false;}
     CFStringRef cf=CFStringCreateWithCString(nullptr,path.c_str(),kCFStringEncodingUTF8);
     if(!cf){fprintf(stderr,"Could not convert source path to a UTF-8 string\n");return false;}
     hr=p.codec->OpenClip(cf,&p.clip); CFRelease(cf);

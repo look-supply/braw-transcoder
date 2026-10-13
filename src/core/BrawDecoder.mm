@@ -128,14 +128,14 @@ void BrawDecoder::SetCancellation(const std::atomic<bool>* cancel){m_impl->cance
 void BrawDecoder::SetCustomLUT(const std::string&){m_impl->error="Custom LUT files are not supported";}
 void BrawDecoder::CaptureNativeSettings(){} // Included in the worker's open response.
 void BrawDecoder::FlushJobs(){} // IPC responses arrive only after a completed request.
-void BrawDecoder::RequestFrame(uint64_t index,const ClipAdjustments& a,FrameCallback callback,float scale) {
-    auto& p=*m_impl;if(index>=p.frames||!p.width){p.error="Frame index is out of range";return;}
-    if(p.cancel&&p.cancel->load()){p.error="Cancelled";return;}
+std::vector<uint8_t> BrawDecoder::DecodeFrameSync(uint64_t index,int* w,int* h,int* stride,const ClipAdjustments& a,float scale) {
+    auto& p=*m_impl;if(index>=p.frames||!p.width){p.error="Frame index is out of range";return {};}
+    if(p.cancel&&p.cancel->load()){p.error="Cancelled";return {};}
     if(a.iso&&((p.isoReadOnly&&a.iso!=p.iso)||std::find(p.isoList.begin(),p.isoList.end(),a.iso)==p.isoList.end())) {
-        p.error="ISO "+std::to_string(a.iso)+" is not supported by this clip's recorded analog gain. Use a listed ISO or adjust Exposure.";return;
+        p.error="ISO "+std::to_string(a.iso)+" is not supported by this clip's recorded analog gain. Use a listed ISO or adjust Exposure.";return {};
     }
     if(a.lensCorrections & ~p.lensCorrectionSupport) {
-        p.error="Requested lens correction is unavailable for this clip.";return;
+        p.error="Requested lens correction is unavailable for this clip.";return {};
     }
     Request request;request.command=Frame;request.index=index;request.iso=a.iso;
     request.temperature=a.colorTemp;request.tint=a.tint;request.exposure=a.exposure;
@@ -151,11 +151,11 @@ void BrawDecoder::RequestFrame(uint64_t index,const ClipAdjustments& a,FrameCall
         fprintf(stderr,"Metal worker failed; retrying frame on CPU: %s\n",p.error.c_str());
         ok=p.Start(false)&&p.Exchange(request,{},response,pixels);
     }
-    if(!ok)return;
+    if(!ok)return {};
     uint64_t row=uint64_t(response.width)*(p.format==1?6:4);
     if(!response.width||!response.height||response.stride<row||
        uint64_t(response.stride)*response.height!=pixels.size()) {
-        p.error="Invalid frame received from decoder";p.child.Stop();return;
+        p.error="Invalid frame received from decoder";p.child.Stop();return {};
     }
     // Return tightly packed rows to every consumer; SDK row alignment is internal.
     if(response.stride!=row) {
@@ -164,11 +164,13 @@ void BrawDecoder::RequestFrame(uint64_t index,const ClipAdjustments& a,FrameCall
         pixels=std::move(packed);
     }
     p.error.clear();
-    if(callback)callback(pixels.data(),response.width,response.height,row);
+    *w=response.width;*h=response.height;*stride=row;
+    return pixels;
 }
-std::vector<uint8_t> BrawDecoder::DecodeFrameSync(uint64_t index,int* w,int* h,int* stride,const ClipAdjustments& a,float scale) {
-    std::vector<uint8_t> out;RequestFrame(index,a,[&](const uint8_t* p,int width,int height,int row){
-        *w=width;*h=height;*stride=row;out.assign(p,p+size_t(row)*height);},scale);return out;
+void BrawDecoder::RequestFrame(uint64_t index,const ClipAdjustments& a,FrameCallback callback,float scale) {
+    int w=0,h=0,stride=0;
+    const auto pixels=DecodeFrameSync(index,&w,&h,&stride,a,scale);
+    if(!pixels.empty()&&callback)callback(pixels.data(),w,h,stride);
 }
 void BrawDecoder::DecodeFramesCPUBatch(uint64_t start,uint64_t end,const ClipAdjustments& a,FrameCallback cb,int) {
     for(uint64_t i=start;i<end;i++){RequestFrame(i,a,cb);if(!m_impl->error.empty())return;}

@@ -18,7 +18,8 @@ struct PreviewView: View {
             Divider()
             
             if let clip = project.selectedClip {
-                PreviewContent(clip: clip, isExporting: project.isExporting)
+                PreviewContent(clip: clip, project: project)
+                    .id(clip.id)
             } else {
                 GeometryReader { geo in
                     ZStack {
@@ -35,12 +36,50 @@ struct PreviewView: View {
                 }
             }
         }
+        .background(PlaybackKeyboardShortcuts(project: project).frame(width: 0, height: 0))
+    }
+}
+
+/// Handle Space before focused buttons consume it. Text editors keep their
+/// normal input; the monitor only handles events from the preview's own window.
+struct PlaybackKeyboardShortcuts: NSViewRepresentable {
+    let project: ProjectModel
+    func makeNSView(context: Context) -> Anchor { Anchor() }
+    func updateNSView(_ view: Anchor, context: Context) { view.project = project }
+    static func dismantleNSView(_ view: Anchor, coordinator: ()) { view.removeMonitor() }
+
+    final class Anchor: NSView {
+        var project: ProjectModel?
+        private var monitor: Any?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            removeMonitor()
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self else { return event }
+                return self.handle(event)
+            }
+        }
+        func handle(_ event: NSEvent) -> NSEvent? {
+            guard let window, event.window === window, event.keyCode == 49,
+                  event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+                  !(window.firstResponder is NSTextView),
+                  let project, !project.isExporting, !project.isImporting,
+                  let clip = project.selectedClip, clip.frameCount > 0 else { return event }
+            if !event.isARepeat { clip.togglePlayback() }
+            return nil
+        }
+        func removeMonitor() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
     }
 }
 
 struct PreviewContent: View {
     @ObservedObject var clip: ClipModel
-    let isExporting: Bool
+    @ObservedObject var project: ProjectModel
+    var isExporting: Bool { project.isExporting || project.isImporting }
     
     var body: some View {
         GeometryReader { geo in
@@ -49,7 +88,11 @@ struct PreviewContent: View {
                 
                 let aspect = clip.renderAspectRatio
                 
-                if let preview = clip.preview {
+                if let frame = clip.playbackFrame {
+                    MetalPlaybackView(frame: frame)
+                        .aspectRatio(aspect, contentMode: .fit)
+                        .frame(maxWidth: geo.size.width - 24, maxHeight: geo.size.height - 60)
+                } else if let preview = clip.preview {
                     Image(nsImage: preview)
                         .resizable()
                         .aspectRatio(aspect, contentMode: .fit)
@@ -75,38 +118,97 @@ struct PreviewContent: View {
                             .padding(8).background(.black.opacity(0.8))
                     }
                     Spacer()
-                    VStack(spacing: 4) {
-                        HStack {
-                            Text("Frame").font(.system(size: 10))
-                                .foregroundColor(.white.opacity(0.5))
-                            
-                            Slider(value: Binding<Double>(
-                                get: { Double(clip.currentFrame) },
-                                set: { clip.currentFrame = UInt64($0) }
-                            ), in: 0...Double(max(clip.frameCount, 1) - 1))
-                            .controlSize(.small)
-                            .disabled(isExporting)
-                            
-                            Text("\(clip.currentFrame)").font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(.white.opacity(0.7))
-                                .frame(width: 60, alignment: .trailing)
+                    HStack(alignment: .top, spacing: 12) {
+                        Button { clip.togglePlayback() } label: {
+                            Image(systemName: clip.isPlaying ? "pause.fill" : "play.fill")
+                                .frame(width: 18, height: 18)
                         }
-                        .padding(.horizontal, 16)
-                        
-                        HStack {
-                            Text("0").font(.system(size: 9, design: .monospaced))
-                                .foregroundColor(.white.opacity(0.3))
-                            Spacer()
-                            Text("\(clip.frameCount - 1)").font(.system(size: 9, design: .monospaced))
-                                .foregroundColor(.white.opacity(0.3))
+                        .buttonStyle(.plain)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .help(clip.isPlaying ? "Pause playback (Space)" : "Play (Space)")
+                        .accessibilityLabel(clip.isPlaying ? "Pause" : "Play")
+                        .accessibilityIdentifier("preview-playback")
+                        .disabled(isExporting || clip.frameCount == 0)
+                        .padding(.top, 2)
+                        VStack(spacing: 4) {
+                            HStack(spacing: 8) {
+                                Text("Frame").font(.system(size: 10))
+                                    .foregroundColor(.white.opacity(0.5))
+
+                                Slider(value: Binding<Double>(
+                                    get: { Double(clip.currentFrame) },
+                                    set: { clip.currentFrame = UInt64($0) }
+                                ), in: 0...Double(max(clip.frameCount, 1) - 1))
+                                .controlSize(.small)
+                                .disabled(isExporting)
+
+                                Text("\(clip.currentFrame)").font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.7))
+                                    .frame(width: 44, alignment: .trailing)
+                            }
+
+                            HStack {
+                                Text("0").font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.3))
+                                Spacer()
+                                Text("\(max(clip.frameCount, 1) - 1)").font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.3))
+                            }
                         }
-                        .padding(.horizontal, 16)
+                        PlaybackTransportControls(clip: clip, project: project)
+                            .padding(.top, 2)
                     }
+                    .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .background(Color.black.opacity(0.7))
                 }
             }
         }
+        .onDisappear { clip.stopPlayback(refreshPreview: false) }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            clip.stopPlayback()
+        }
+    }
+}
+
+private struct PlaybackTransportControls: View {
+    @ObservedObject var clip: ClipModel
+    @ObservedObject var project: ProjectModel
+    private var unavailable: Bool { project.isExporting || project.isImporting }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            control("Previous clip", symbol: "backward.end.fill") { project.navigatePlaybackClip(by: -1) }
+                .disabled(unavailable || project.selectedIndex <= 0)
+            Button { clip.togglePlayback(direction: .reverse) } label: {
+                Image(systemName: clip.isPlaying && clip.playbackDirection == .reverse ? "pause.fill" : "play.fill")
+                    .rotationEffect(.degrees(180)).frame(width: 18, height: 18)
+            }
+            .help(clip.isPlaying && clip.playbackDirection == .reverse ? "Pause reverse playback" : "Play in reverse")
+            .accessibilityLabel("Play/Pause in reverse")
+            .accessibilityIdentifier("preview-reverse")
+            .disabled(unavailable || clip.frameCount == 0)
+            control("Stop and rewind", symbol: "stop.fill") { project.stopAndRewindPlayback() }
+                .disabled(unavailable)
+            control("Next clip", symbol: "forward.end.fill") { project.navigatePlaybackClip(by: 1) }
+                .disabled(unavailable || project.selectedIndex >= project.clipCount - 1)
+            control(project.playbackLoopEnabled ? "Disable clip loop" : "Enable clip loop", symbol: "repeat") {
+                project.playbackLoopEnabled.toggle()
+            }
+                .foregroundStyle(project.playbackLoopEnabled ? Color.red : Color.white.opacity(0.55))
+                .accessibilityValue(project.playbackLoopEnabled ? "On" : "Off")
+                .accessibilityIdentifier("preview-loop")
+                .disabled(unavailable)
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: 15, weight: .medium))
+        .foregroundStyle(.white.opacity(0.55))
+        .fixedSize()
+    }
+    private func control(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: symbol).frame(width: 18, height: 18) }
+            .help(title).accessibilityLabel(title)
     }
 }
 

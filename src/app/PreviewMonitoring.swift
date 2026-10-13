@@ -1,5 +1,45 @@
 import Foundation
 
+enum PlaybackResolution: String, CaseIterable, Identifiable {
+    case full, half, quarter, eighth
+    var id: Self { self }
+    var label: String {
+        switch self {
+        case .full: "Full"
+        case .half: "1/2"
+        case .quarter: "1/4"
+        case .eighth: "1/8"
+        }
+    }
+    var scale: Float {
+        switch self {
+        case .full: 1
+        case .half: 0.5
+        case .quarter: 0.25
+        case .eighth: 0.125
+        }
+    }
+}
+
+enum PlaybackDirection { case forward, reverse }
+
+/// Maps elapsed monotonic time to source frames, including fractional frame rates.
+struct PlaybackTimeline {
+    let firstFrame: UInt64
+    let frameCount: UInt64
+    let fps: Double
+    var direction: PlaybackDirection = .forward
+
+    func frame(at elapsed: Double) -> UInt64 {
+        guard frameCount > 0 else { return 0 }
+        let first = min(firstFrame, frameCount - 1)
+        guard elapsed.isFinite, elapsed > 0, fps.isFinite, fps > 0 else { return first }
+        let remaining = direction == .forward ? frameCount - 1 - first : first
+        let advance = UInt64(min(Double(remaining), floor(elapsed * fps)))
+        return direction == .forward ? first + advance : first - advance
+    }
+}
+
 enum PreviewMode: String, CaseIterable, Identifiable {
     case embeddedLUT = "Preview embedded LUT"
     case log = "Log"
