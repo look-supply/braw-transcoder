@@ -54,6 +54,7 @@ int main() {
             a.exposure=request.exposure;a.highlightRecovery=request.highlight;a.previewLUT=request.lut;a.gamutCompression=request.gamutCompression;a.lensCorrections=request.lensCorrections;
             a.anamorphic=request.anamorphic;a.rotation=request.rotation;a.flips=request.flips;
             a.customDesqueeze=request.customDesqueeze;
+            a.monitoringLog=request.monitoringLog;
             a.toneCurveEnabled=request.toneEnabled;a.videoBlack=request.videoBlack;
             std::copy(std::begin(request.toneValues),std::end(request.toneValues),a.toneValues.begin());
             SDKDecoder::Frame frame;

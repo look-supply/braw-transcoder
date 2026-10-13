@@ -10,9 +10,9 @@ struct ExportView: View {
     @AppStorage("exportOutputDirectory") private var outputDir = ""
     @AppStorage("exportUseSourceDirectory") private var useSourceDirectory = true
 
-    init(project: ProjectModel) {
+    init(project: ProjectModel, manager: ExportManager? = nil) {
         self.project = project
-        _exportMgr = StateObject(wrappedValue: ExportManager(project: project))
+        _exportMgr = StateObject(wrappedValue: manager ?? ExportManager(project: project))
     }
 
     let codecs = ["H.264", "H.265", "ProRes"]
@@ -43,10 +43,12 @@ struct ExportView: View {
         )
     }
 
+    var effectiveResolution: Int { availableResolutionModes.contains(selectedResolution) ? selectedResolution : 0 }
+
     var estimatedOutput: String {
         guard let clip = project.selectedClip, clip.renderDimensions.height > 0 else { return "—" }
         var width: Int32 = 0, height: Int32 = 0
-        guard braw_export_dimensions(Int32(selectedResolution), clip.renderDimensions.width,
+        guard braw_export_dimensions(Int32(effectiveResolution), clip.renderDimensions.width,
                                      clip.renderDimensions.height, &width, &height) != 0 else { return "—" }
         let original = width == clip.renderDimensions.width && height == clip.renderDimensions.height
         return "\(width) × \(height)" + (original ? " (original)" : "")
@@ -60,148 +62,109 @@ struct ExportView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Image(systemName: "square.and.arrow.up").foregroundColor(.secondary)
-                Text("Export").font(.headline).foregroundColor(.secondary)
-                Spacer()
-                if project.selectedClip != nil {
-                    Text("Output: \(estimatedOutput)")
-                        .font(.system(size: 11)).foregroundColor(.blue)
-                    Text("·").foregroundColor(.secondary)
-                    Text(colorInfo)
-                        .font(.system(size: 10)).foregroundColor(.secondary)
-                }
-            }
-            .padding(.horizontal, 12).padding(.vertical, 6)
-
-            Divider()
-
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 16) {
-                    encodingControls
-                    Spacer(minLength: 16)
-                    outputControls
-                    Spacer(minLength: 16)
-                    exportButtons
-                }
-                VStack(alignment: .leading, spacing: 12) {
-                    encodingControls
-                    HStack(spacing: 16) {
-                        outputControls
-                        Spacer(minLength: 16)
-                        exportButtons
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Label("Export", systemImage: "square.and.arrow.up")
+                        .font(.headline).foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    if !exportMgr.isExporting, project.selectedClip != nil {
+                        Text("Output: \(estimatedOutput)")
+                            .font(.system(size: 11)).foregroundStyle(.blue)
+                            .lineLimit(1)
                     }
                 }
+                if !exportMgr.isExporting, project.selectedClip != nil {
+                    Text(colorInfo).font(.system(size: 10)).foregroundStyle(.secondary)
+                        .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
-            .padding(12)
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            Divider()
 
-            if let status = exportMgr.statusMessage {
-                Text(status).font(.caption).textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12).padding(.bottom, 8)
-            }
             if exportMgr.isExporting {
-                VStack(spacing: 4) {
-                    ProgressView(value: exportMgr.progress, total: 1.0)
-                        .progressViewStyle(.linear).padding(.horizontal, 12)
-                    HStack {
-                        Text("Clip \(exportMgr.clipIndex + 1)/\(exportMgr.totalClips)")
-                            .font(.system(size: 10)).foregroundColor(.secondary)
-                        Text("·").foregroundColor(.secondary)
-                        Text("Frame \(exportMgr.currentFrame)/\(exportMgr.totalFrames)")
-                            .font(.system(size: 10)).foregroundColor(.secondary)
-                        Spacer()
-                        Text("\(Int(exportMgr.progress * 100))%")
-                            .font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
-                        Button(exportMgr.isCancelling ? "Cancelling…" : "Cancel") { exportMgr.cancel() }
-                            .disabled(exportMgr.isCancelling)
-                            .buttonStyle(.borderless).font(.system(size: 10))
-                    }.padding(.horizontal, 16).padding(.bottom, 6)
+                ExportProgressView(manager: exportMgr).padding(12)
+            } else {
+                ExportControlsLayout {
+                    ExportField(title: "Codec") {
+                        FullWidthDropdown(title: "Codec", options: codecs.enumerated().map {
+                            .init(title: $0.element, value: $0.offset)
+                        }, selection: $selectedCodec)
+                    }.layoutValue(key: ExportFieldWidth.self, value: 112)
+
+                    ExportField(title: "Resolution") {
+                        FullWidthDropdown(title: "Resolution", options: resolutions
+                            .filter { availableResolutionModes.contains($0.mode) }
+                            .map { .init(title: $0.label, value: $0.mode) }, selection: resolutionSelection)
+                            .help("Preserves aspect ratio and only downsamples. Smaller clips in a batch retain their original resolution.")
+                    }.layoutValue(key: ExportFieldWidth.self, value: 208)
+
+                    ExportField(title: selectedCodec == 2 ? "Profile" : "Data Rate") {
+                        if selectedCodec == 2 {
+                            FullWidthDropdown(title: "Profile", options: proResProfiles.enumerated().map {
+                                .init(title: $0.element, value: $0.offset)
+                            }, selection: $selectedProResProfile)
+                        } else {
+                            FullWidthDropdown(title: "Data Rate", options: dataRates.enumerated().map {
+                                .init(title: $0.element, value: $0.offset)
+                            }, selection: $selectedDataRate)
+                        }
+                    }.layoutValue(key: ExportFieldWidth.self, value: 124)
+
+                    ExportField(title: "Output") {
+                        HStack {
+                            Text("Same folder as BRAW").font(.system(size: 11)).lineLimit(1)
+                            Spacer(minLength: 8)
+                            Toggle("Same folder as BRAW", isOn: $useSourceDirectory)
+                                .labelsHidden().toggleStyle(.switch).controlSize(.small).fixedSize()
+                                .accessibilityLabel("Same folder as BRAW")
+                        }.frame(minHeight: 22)
+                        if !useSourceDirectory {
+                            HStack(spacing: 8) {
+                                TextField("Choose output folder", text: $outputDir)
+                                    .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                                    .accessibilityLabel("Output folder")
+                                Button(action: pickOutputDir) { Image(systemName: "folder") }
+                                    .buttonStyle(.bordered).controlSize(.small)
+                                    .accessibilityLabel("Choose output folder")
+                            }
+                        }
+                    }.layoutValue(key: ExportFieldWidth.self, value: 208)
+
+                    VStack(spacing: 4) {
+                        Text("Export actions").font(.system(size: 11, weight: .medium)).hidden()
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 8) { exportSelectedButton; exportAllButton }
+                            VStack(spacing: 6) { exportSelectedButton; exportAllButton }
+                        }
+                    }.layoutValue(key: ExportFieldWidth.self, value: 156)
+                }
+                .padding(12)
+                if let status = exportMgr.statusMessage {
+                    Text(status).font(.caption).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12).padding(.bottom, 8)
                 }
             }
         }
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-    }
-
-    private var encodingControls: some View {
-        HStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Codec").font(.system(size: 10)).foregroundColor(.secondary)
-                    Picker("", selection: $selectedCodec) {
-                        ForEach(0..<codecs.count, id: \.self) { i in Text(codecs[i]).tag(i) }
-                    }.pickerStyle(.menu).frame(width: 100)
-                    .disabled(exportMgr.isExporting)
-                }
-
-                if selectedCodec == 2 {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Profile").font(.system(size: 10)).foregroundColor(.secondary)
-                        Picker("", selection: $selectedProResProfile) {
-                            ForEach(0..<proResProfiles.count, id: \.self) { i in Text(proResProfiles[i]).tag(i) }
-                        }.pickerStyle(.menu).frame(width: 120)
-                        .disabled(exportMgr.isExporting)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Resolution").font(.system(size: 10)).foregroundColor(.secondary)
-                    Picker("", selection: resolutionSelection) {
-                        ForEach(resolutions.filter { availableResolutionModes.contains($0.mode) }, id: \.mode) { option in
-                            Text(option.label).tag(option.mode)
-                        }
-                    }.pickerStyle(.menu).frame(width: 180)
-                    .help("Preserves aspect ratio. Only presets that downsample the previewed clip are available. In mixed batches, smaller clips keep their original resolution.")
-                    .onChange(of: availableResolutionModes, initial: true) { _, modes in
-                        if !modes.contains(selectedResolution) { selectedResolution = 0 }
-                    }
-                    .disabled(exportMgr.isExporting)
-                }
-
-                if selectedCodec != 2 {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Data Rate").font(.system(size: 10)).foregroundColor(.secondary)
-                        Picker("", selection: $selectedDataRate) {
-                            ForEach(0..<dataRates.count, id: \.self) { i in Text(dataRates[i]).tag(i) }
-                        }.pickerStyle(.menu).frame(width: 120)
-                        .disabled(exportMgr.isExporting)
-                    }
-                }
+        .onChange(of: availableResolutionModes, initial: true) { _, modes in
+            if !modes.contains(selectedResolution) { selectedResolution = 0 }
         }
     }
-    private var outputControls: some View {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Output").font(.system(size: 10)).foregroundColor(.secondary).fixedSize()
-                    Toggle("Same folder as BRAW", isOn: $useSourceDirectory)
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                        .font(.system(size: 11)).fixedSize()
-                        .help("Save each MOV beside its original BRAW file.")
-                        .disabled(exportMgr.isExporting)
-                    if !useSourceDirectory {
-                        HStack(spacing: 4) {
-                            TextField("Same folder as BRAW", text: $outputDir)
-                                .textFieldStyle(.roundedBorder).frame(width: 160).font(.system(size: 11))
-                                .disabled(exportMgr.isExporting)
-                            Button(action: pickOutputDir) {
-                                Image(systemName: "folder")
-                            }.buttonStyle(.borderless)
-                            .disabled(exportMgr.isExporting)
-                        }
-                    }
-                }
-    }
-    private var exportButtons: some View {
-                VStack(alignment: .center, spacing: 4) {
-                    Button(action: { exportSelectedClips() }) {
-                        Label("Export Selected", systemImage: "arrow.right.circle.fill").frame(width: 130)
-                    }.buttonStyle(.borderedProminent).controlSize(.small)
-                        .disabled(project.selectedIndices.isEmpty || project.isImporting || exportMgr.isExporting)
 
-                    Button(action: { exportAllClips() }) {
-                        Label("Export All", systemImage: "arrow.right.circle").frame(width: 130)
-                    }.buttonStyle(.bordered).controlSize(.small)
-                        .disabled(project.clipCount == 0 || project.isImporting || exportMgr.isExporting)
-                }
+    private var exportSelectedButton: some View {
+        Button(action: exportSelectedClips) {
+            Label("Export Selected", systemImage: "arrow.right.circle.fill")
+                .font(.system(size: 11)).lineLimit(1).frame(minWidth: 136, maxWidth: .infinity)
+        }.buttonStyle(.borderedProminent).controlSize(.small)
+            .disabled(project.selectedIndices.isEmpty || project.isImporting)
+    }
+    private var exportAllButton: some View {
+        Button(action: exportAllClips) {
+            Label("Export All", systemImage: "arrow.right.circle")
+                .font(.system(size: 11)).lineLimit(1).frame(minWidth: 136, maxWidth: .infinity)
+        }.buttonStyle(.bordered).controlSize(.small)
+            .disabled(project.clipCount == 0 || project.isImporting)
     }
 
     func pickOutputDir() {
@@ -229,4 +192,46 @@ struct ExportView: View {
 
     func exportSelectedClips() { startExport(selectedOnly: true) }
     func exportAllClips() { startExport(selectedOnly: false) }
+}
+
+private struct ExportField<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 11, weight: .medium)).lineLimit(1)
+            content()
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct ExportProgressView: View {
+    @ObservedObject var manager: ExportManager
+    var body: some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(manager.currentClipName.isEmpty ? "Preparing export…" : manager.currentClipName)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    Text("\(Int(max(0, min(1, manager.progress)) * 100))%")
+                        .font(.system(size: 11, design: .monospaced))
+                }
+                ProgressView(value: manager.progress, total: 1).progressViewStyle(.linear)
+                HStack(spacing: 8) {
+                    Text("Clip \(manager.clipIndex + 1) of \(max(1, manager.totalClips))")
+                    if manager.totalFrames > 0 {
+                        Text("·")
+                        Text("Frame \(manager.currentFrame) of \(manager.totalFrames)")
+                    }
+                }.font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity)
+            Button(manager.isCancelling ? "Cancelling…" : "Cancel") { manager.cancel() }
+                .buttonStyle(.bordered).controlSize(.small)
+                .disabled(manager.isCancelling)
+                .keyboardShortcut(.cancelAction)
+                .accessibilityIdentifier("cancel-export")
+        }
+    }
 }

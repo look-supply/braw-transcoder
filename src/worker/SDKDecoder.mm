@@ -231,7 +231,21 @@ public:
                 attrs->Release();clipAttrs->Release();if(job)job->Release();impl->Finish(false);return;
             }
         }
-        if(a.toneCurveEnabled) {
+        if(a.monitoringLog) {
+            // Clone-only override: monitoring must not change source/export gamma.
+            Variant generation;VariantInit(&generation);
+            clipAttrs->GetClipAttribute(blackmagicRawClipProcessingAttributeColorScienceGen,&generation);
+            v.vt=blackmagicRawVariantTypeString;
+            v.bstrVal=generation.vt==blackmagicRawVariantTypeU16 && generation.uiVal>=6
+                ? CFSTR("DaVinci Intermediate") : CFSTR("Blackmagic Design Film");
+            VariantClear(&generation);
+            HRESULT hr=clipAttrs->SetClipAttribute(blackmagicRawClipProcessingAttributeGamma,&v);
+            if(FAILED(hr)) {
+                fprintf(stderr,"Could not select log monitoring gamma: 0x%x\n",unsigned(hr));
+                attrs->Release();clipAttrs->Release();if(job)job->Release();impl->Finish(false);return;
+            }
+        }
+        if(a.toneCurveEnabled && !a.monitoringLog) {
             if(!impl->toneInfo.supported) {
                 fprintf(stderr,"Custom tone curves are unavailable for this source gamma/gamut.\n");
                 attrs->Release();clipAttrs->Release();if(job)job->Release();impl->Finish(false);return;
@@ -258,7 +272,7 @@ public:
                 attrs->Release();clipAttrs->Release();if(job)job->Release();impl->Finish(false);return;
             }
         }
-        v.vt=blackmagicRawVariantTypeString; v.bstrVal=a.previewLUT?CFSTR("Embedded"):CFSTR("Disabled");
+        v.vt=blackmagicRawVariantTypeString; v.bstrVal=a.previewLUT && !a.monitoringLog?CFSTR("Embedded"):CFSTR("Disabled");
         HRESULT lutResult=clipAttrs->SetClipAttribute(blackmagicRawClipProcessingAttributePost3DLUTMode,&v);
         if(FAILED(lutResult)) {
             fprintf(stderr,"Could not set preview LUT mode to %s: 0x%x\n",a.previewLUT?"Embedded":"Disabled",unsigned(lutResult));

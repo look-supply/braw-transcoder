@@ -272,6 +272,26 @@ uint8_t* braw_clip_decode_frame_scaled(BrawClipHandle* h, uint64_t index, int* w
     return out;
 }
 
+// Snapshot-only monitoring request: export settings remain untouched.
+uint8_t* braw_clip_decode_monitor_frame(BrawClipHandle* h, uint64_t index, int* w, int* outH, float scale, bool logSignal) {
+    if (!h) return nullptr;
+    std::lock_guard<std::recursive_mutex> lock(h->decoderMutex);
+    ensureDecoder(h);
+    ClipAdjustments adjustments;
+    {std::lock_guard settingsLock(h->settingsMutex);adjustments=h->adjustments;}
+    adjustments.monitoringLog = logSignal;
+    if (logSignal) { adjustments.previewLUT=false; adjustments.toneCurveEnabled=false; }
+    int bpr = 0;
+    if(!h->decoderOpen) {h->lastError=h->decoder->LastError();return nullptr;}
+    auto pixels = h->decoder->DecodeFrameSync(index, w, outH, &bpr, adjustments, scale);
+    h->lastError=h->decoder->LastError();
+    if (pixels.empty()) return nullptr;
+    uint8_t* out = (uint8_t*)malloc(pixels.size());
+    if(!out){h->lastError="Unable to allocate frame memory";return nullptr;}
+    memcpy(out, pixels.data(), pixels.size());
+    return out;
+}
+
 void braw_clip_free_frame(uint8_t* data) { free(data); }
 
 // Diagnostic logging from Swift

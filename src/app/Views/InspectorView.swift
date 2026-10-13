@@ -1,49 +1,5 @@
 import SwiftUI
 
-// A native popup with a flexible intrinsic width, so the control itself fills
-// its row rather than only expanding the SwiftUI frame around it.
-private struct InspectorDropdown: NSViewRepresentable {
-    struct Option: Equatable { let title: String; let value: Int }
-    let title: String
-    let options: [Option]
-    @Binding var selection: Int
-    @Environment(\.isEnabled) private var isEnabled
-
-    final class Popup: NSPopUpButton {
-        override var intrinsicContentSize: NSSize {
-            NSSize(width: NSView.noIntrinsicMetric, height: super.intrinsicContentSize.height)
-        }
-    }
-    @MainActor final class Coordinator: NSObject {
-        var parent: InspectorDropdown
-        var options: [Option] = []
-        init(_ parent: InspectorDropdown) { self.parent = parent }
-        @objc func select(_ sender: NSPopUpButton) {
-            let index = sender.indexOfSelectedItem
-            guard options.indices.contains(index) else { return }
-            parent.selection = options[index].value
-        }
-    }
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-    func makeNSView(context: Context) -> Popup {
-        let popup = Popup(frame: .zero, pullsDown: false)
-        popup.target = context.coordinator
-        popup.action = #selector(Coordinator.select(_:))
-        return popup
-    }
-    func updateNSView(_ popup: Popup, context: Context) {
-        context.coordinator.parent = self
-        if context.coordinator.options != options {
-            popup.removeAllItems()
-            popup.addItems(withTitles: options.map(\.title))
-            context.coordinator.options = options
-        }
-        popup.selectItem(at: options.firstIndex { $0.value == selection } ?? -1)
-        popup.isEnabled = isEnabled
-        popup.setAccessibilityLabel(title)
-    }
-}
-
 enum InspectorPanel: CaseIterable { case raw, anamorphic, tone, lens }
 
 private struct CustomDesqueezeField: View {
@@ -152,6 +108,7 @@ struct InspectorView: View {
             
             if let clip = project.selectedClip {
                 InspectorContent(clip: clip, project: project, expandedPanels: $expandedPanels)
+                    .frame(minHeight: 0, maxHeight: .infinity)
                 Divider()
                 InspectorFooter(clip: clip, project: project)
                     .fixedSize(horizontal: false, vertical: true)
@@ -238,7 +195,7 @@ struct InspectorContent: View {
                             ResettableSettingLabel(title: "ISO") { clip.applyISOPreset(0) }
                                 .font(.system(size: 11, weight: .medium))
                                 .disabled(isExporting || clip.isoReadOnly)
-                            InspectorDropdown(title: "ISO", options:
+                            FullWidthDropdown(title: "ISO", options:
                                 [.init(title: "\(clip.nativeISO) (As Shot)", value: 0)] +
                                 clip.isoPresets.enumerated().map { .init(title: "\($0.element)", value: $0.offset + 1) },
                                 selection: Binding<Int>(
@@ -260,7 +217,7 @@ struct InspectorContent: View {
                             ResettableSettingLabel(title: "White Balance") { clip.applyColorPreset(0) }
                                 .font(.system(size: 11, weight: .medium))
                                 .disabled(isExporting)
-                            InspectorDropdown(title: "White Balance", options:
+                            FullWidthDropdown(title: "White Balance", options:
                                 ClipModel.colorPresetLabels.enumerated().map { .init(title: $0.element, value: $0.offset) },
                                 selection: Binding<Int>(
                                 get: { clip.colorPresetIndex },
@@ -321,7 +278,7 @@ struct InspectorContent: View {
                         ResettableSettingLabel(title: "Desqueeze") { clip.anamorphicMode = 0 }
                             .font(.system(size: 11, weight: .medium))
                             .disabled(isExporting)
-                        InspectorDropdown(title: "Desqueeze", options:
+                        FullWidthDropdown(title: "Desqueeze", options:
                             anamorphicLabels.enumerated().map { .init(title: $0.element, value: $0.offset) },
                             selection: $clip.anamorphicMode)
                         .frame(maxWidth: .infinity)

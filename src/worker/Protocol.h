@@ -13,7 +13,7 @@ struct Request {
     int32_t tint=0;
     float exposure=0,scale=1;
     uint32_t highlight=0,lut=0,metal=0,format=0,gamutCompression=0,lensCorrections=0;
-    uint32_t anamorphic=0,rotation=0,flips=0,toneEnabled=0,videoBlack=0;
+    uint32_t anamorphic=0,rotation=0,flips=0,toneEnabled=0,videoBlack=0,monitoringLog=0;
     float customDesqueeze=2.0f;
     float toneValues[7]{};
     uint64_t size=0;

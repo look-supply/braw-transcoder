@@ -100,6 +100,7 @@ BrawClipSettings braw_clip_get_settings(BrawClipHandle* h);
 // Caller must free the returned buffer with braw_clip_free_frame().
 uint8_t* braw_clip_decode_frame(BrawClipHandle* h, uint64_t index, int* w, int* outH);
 uint8_t* braw_clip_decode_frame_scaled(BrawClipHandle* h, uint64_t index, int* w, int* outH, float scale);
+uint8_t* braw_clip_decode_monitor_frame(BrawClipHandle* h, uint64_t index, int* w, int* outH, float scale, bool logSignal);
 void     braw_clip_free_frame(uint8_t* data);
 
 // Audio extraction: returns PCM float samples (caller frees with free())

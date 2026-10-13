@@ -65,6 +65,8 @@ add_executable(${PROJECT_NAME}
     src/app/Views/NumericSlider.swift
     src/app/Views/RGBWaveformView.swift
     src/app/Views/ExportView.swift
+    src/app/Views/ExportControlsLayout.swift
+    src/app/Views/FullWidthDropdown.swift
     src/app/Info.plist
 )
 
@@ -149,7 +151,17 @@ add_executable(braw_numeric_slider_test test/numeric_slider.swift src/app/Views/
 target_link_libraries(braw_numeric_slider_test PRIVATE "-framework AppKit" "-framework SwiftUI")
 add_test(NAME numeric_slider COMMAND braw_numeric_slider_test)
 set_tests_properties(numeric_slider PROPERTIES TIMEOUT 20)
+add_executable(braw_export_panel_test test/export_panel.swift src/app/ProjectModel.swift
+    src/app/RGBWaveform.swift src/app/Views/ExportView.swift
+    src/app/Views/ExportControlsLayout.swift src/app/Views/FullWidthDropdown.swift)
+target_include_directories(braw_export_panel_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(braw_export_panel_test PRIVATE
+    "SHELL:-import-objc-header ${CMAKE_SOURCE_DIR}/src/bridge/braw_api.h")
+target_link_libraries(braw_export_panel_test PRIVATE braw_core "-framework AppKit" "-framework SwiftUI" "-framework CoreFoundation")
+add_dependencies(braw_export_panel_test braw_worker)
 if(EXISTS "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    add_test(NAME export_panel COMMAND braw_export_panel_test "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    set_tests_properties(export_panel PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 30)
     add_test(NAME embedded_lut COMMAND braw_reliability_test --embedded-lut "${BRAW_SDK_ROOT}/../Media/sample.braw")
     set_tests_properties(embedded_lut PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 60)
     add_test(NAME geometry_tone COMMAND braw_reliability_test --geometry-tone "${BRAW_SDK_ROOT}/../Media/sample.braw")

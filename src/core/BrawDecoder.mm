@@ -142,6 +142,7 @@ void BrawDecoder::RequestFrame(uint64_t index,const ClipAdjustments& a,FrameCall
     request.scale=scale;request.highlight=a.highlightRecovery;request.lut=a.previewLUT;request.gamutCompression=a.gamutCompression;request.lensCorrections=a.lensCorrections;
     request.anamorphic=a.anamorphic;request.rotation=a.rotation;request.flips=a.flips;
     request.customDesqueeze=a.customDesqueeze;
+    request.monitoringLog=a.monitoringLog;
     request.toneEnabled=a.toneCurveEnabled;request.videoBlack=a.videoBlack;
     std::copy(a.toneValues.begin(),a.toneValues.end(),request.toneValues);
     Response response;std::vector<uint8_t> pixels;

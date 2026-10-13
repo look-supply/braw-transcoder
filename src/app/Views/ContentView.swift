@@ -13,12 +13,13 @@ struct ContentView: View {
                 .frame(minWidth: 250, idealWidth: 250, maxWidth: 350)
                 .layoutPriority(1)
             
-            VSplitView {
+            VStack(spacing: 0) {
                 PreviewView(project: project)
                     .frame(minWidth: 400, minHeight: 300)
-                
+                    .frame(maxHeight: .infinity)
+                Divider()
                 ExportView(project: project)
-                    .frame(minHeight: 130)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .layoutPriority(2)
             

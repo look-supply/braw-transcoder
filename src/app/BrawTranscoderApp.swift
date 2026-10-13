@@ -13,7 +13,7 @@ struct BrawTranscoderApp: App {
     var body: some Scene {
         Window("BRAW Transcoder", id: "main") {
             ContentView(project: project)
-                .frame(minWidth: 1200, minHeight: 700)
+                .frame(minWidth: 1000, minHeight: 700)
         }
         .windowResizability(.contentMinSize)
         .commands {

@@ -101,6 +101,7 @@ struct ClipAdjustments {
     bool     gamutCompression = false;
     uint32_t lensCorrections = 0; // 1=distortion, 2=shading, 4=chromatic aberration
     bool     previewLUT  = true;
+    bool monitoringLog = false; // Per-request monitoring override; never stored/exported.
     uint32_t anamorphic=0,rotation=0,flips=0;
     float customDesqueeze=2.0f;
     bool toneCurveEnabled=false,videoBlack=false;
