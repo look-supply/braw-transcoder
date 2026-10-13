@@ -164,3 +164,7 @@ Keep BRAW for important projects, footage that may need substantial regrading, o
 ## Further details
 
 See the [technical notes](docs/technical-notes.md) for implementation constraints, compatibility findings, and verification scope, and the [third-party component notes](third_party/README.md) for dependency and release-packaging status.
+
+## License
+
+The project's source code is licensed under the [GNU Affero General Public License version 3](LICENSE). Third-party components retain their applicable licenses.

@@ -10,4 +10,4 @@ The executable reports FFmpeg 8.1 and a build with `--enable-gpl`, `libx264`, an
 
 The decoder uses the separately installed Blackmagic RAW SDK 6.0. CMake obtains the headers, dispatch implementation, and framework from `BRAW_SDK_ROOT`. The SDK framework is not stored in this repository. SDK distribution terms must be handled as part of installer packaging if it is bundled in a future release.
 
-No project-wide open-source license has been selected in this repository. Third-party licenses do not grant a license to the project's own source code.
+The project's own source code is distributed under the [GNU Affero General Public License version 3](../LICENSE). Third-party components retain their applicable licenses.
