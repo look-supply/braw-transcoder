@@ -38,7 +38,7 @@ struct BrawTranscoderApp: App {
                     .pickerStyle(.inline)
                 }
             }
-            CommandGroup(after: .pasteboard) {
+            CommandGroup(replacing: .textEditing) {
                 Button("Select All") {
                     if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
                         editor.selectAll(nil)

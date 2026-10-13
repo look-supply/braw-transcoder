@@ -47,6 +47,34 @@ import SwiftUI
         }
     }
 
+    @MainActor static func checkSelectAllKeyboard(project: ProjectModel) throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let anchor = PlaybackKeyboardShortcuts.Anchor()
+        anchor.project = project
+        window.contentView = anchor
+        window.orderFront(nil)
+        defer { anchor.removeMonitor(); window.orderOut(nil) }
+        let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+            timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "a",
+            charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0)!
+        precondition(window.makeFirstResponder(anchor))
+        project.selectClip(0, toggling: true)
+        precondition(project.selectedIndices.isEmpty)
+        precondition(anchor.handle(event) == nil && project.selectedIndices == Set(0..<project.clipCount),
+                     "Command-A did not select clips with no active selection")
+        project.isExporting = true
+        let selection = project.selectedIndices
+        _ = anchor.handle(event)
+        precondition(project.selectedIndices == selection, "Command-A changed selection during export")
+        project.isExporting = false
+        let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 40))
+        anchor.addSubview(editor)
+        precondition(window.makeFirstResponder(editor))
+        precondition(anchor.handle(event) != nil, "Command-A intercepted text editing")
+        precondition(project.selectedIndices == selection)
+    }
+
     @MainActor static func main() async throws {
         _ = NSApplication.shared
         let timeline = PlaybackTimeline(firstFrame: 10, frameCount: 100, fps: 23.976)
@@ -108,6 +136,7 @@ import SwiftUI
         precondition(clip.previewZoom == 0.25)
         clip.resetZoom()
         precondition(clip.previewZoom == 1)
+        try checkSelectAllKeyboard(project: project)
         if clip.frameCount < 2 {
             clip.startPlayback()
             try await wait("single-frame playback") { !clip.isPlaying }

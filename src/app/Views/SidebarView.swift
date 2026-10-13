@@ -194,7 +194,11 @@ private struct ClipSelectionClickTarget: NSViewRepresentable {
 
     final class ClickView: NSView {
         var onClick: ((NSEvent.ModifierFlags) -> Void)?
-        override func mouseDown(with event: NSEvent) { onClick?(event.modifierFlags) }
+        override var acceptsFirstResponder: Bool { true }
+        override func mouseDown(with event: NSEvent) {
+            window?.makeFirstResponder(self)
+            onClick?(event.modifierFlags)
+        }
         override func rightMouseDown(with event: NSEvent) {
             if event.buttonNumber == 0 { onClick?(event.modifierFlags) }
             else { super.rightMouseDown(with: event) }

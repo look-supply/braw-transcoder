@@ -63,9 +63,14 @@ struct PlaybackKeyboardShortcuts: NSViewRepresentable {
         func handle(_ event: NSEvent) -> NSEvent? {
             guard let window, event.window === window,
                   !(window.firstResponder is NSTextView),
-                  let project, let clip = project.selectedClip else { return event }
+                  let project else { return event }
             let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
             let key = event.charactersIgnoringModifiers?.lowercased()
+            if modifiers == .command, key == "a" {
+                project.selectAllClips()
+                return nil
+            }
+            guard let clip = project.selectedClip else { return event }
             if modifiers.contains(.command), modifiers.intersection([.control, .option]).isEmpty {
                 if key == "+" || key == "=" { clip.zoomIn(); return nil }
                 if key == "-" { clip.zoomOut(); return nil }
