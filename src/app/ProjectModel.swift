@@ -386,6 +386,10 @@ final class ClipModel: Identifiable, ObservableObject {
 
     private var _fileName: String = ""
     var fileName: String { _fileName }
+    private(set) var cameraName: String = ""
+    var fileNameWithCamera: String {
+        cameraName.isEmpty ? fileName : "\(fileName) \(cameraName)"
+    }
     private(set) var hasEmbeddedLUT = false
     private(set) var embeddedLUTName = ""
     func saveEmbeddedLUT(to url: URL) async -> String? {
@@ -437,6 +441,7 @@ final class ClipModel: Identifiable, ObservableObject {
         self.native = NativeClip(retainedHandle: handle)
         if let h = self.handle {
             _fileName = String(cString: braw_clip_get_filename(h))
+            cameraName = String(cString: braw_clip_get_camera_type(h)).trimmingCharacters(in: .whitespacesAndNewlines)
             hasEmbeddedLUT = braw_clip_has_embedded_lut(h)
             embeddedLUTName = String(cString: braw_clip_embedded_lut_name(h))
             let fullPath = String(cString: braw_clip_get_filepath(h))
@@ -499,6 +504,15 @@ final class ClipModel: Identifiable, ObservableObject {
     var nativeWidth: UInt32  { handle.map { braw_clip_get_width($0) } ?? 0 }
     var nativeHeight: UInt32 { handle.map { braw_clip_get_height($0) } ?? 0 }
     var frameRate: Float     { handle.map { braw_clip_get_frame_rate($0) } ?? 0 }
+    var durationTimecode: String { Self.durationTimecode(frames: frameCount, fps: frameRate) }
+    static func durationTimecode(frames: UInt64, fps: Float) -> String {
+        guard fps.isFinite, fps > 0,
+              let rate = UInt64(exactly: max(1, Double(fps).rounded())) else { return "--:--:--:--" }
+        let seconds = frames / rate
+        return String(format: "%02llu:%02llu:%02llu:%02llu",
+                      seconds / 3600, (seconds / 60) % 60, seconds % 60, frames % rate)
+    }
+
     var frameCount: UInt64   { handle.map { braw_clip_get_frame_count($0) } ?? 0 }
 
     func releaseDecoder() {

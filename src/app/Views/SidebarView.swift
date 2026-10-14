@@ -214,15 +214,31 @@ struct ClipRowView: View {
     private var thumbnailAspectRatio: CGFloat {
         clip.renderAspectRatio
     }
+
+    private var cameraModel: String {
+        for prefix in ["Blackmagic Design ", "Blackmagic "] {
+            if clip.cameraName.lowercased().hasPrefix(prefix.lowercased()) {
+                return String(clip.cameraName.dropFirst(prefix.count))
+            }
+        }
+        return clip.cameraName
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             // Filename above thumbnail
-            Text(clip.fileName)
-                .font(.system(size: 11, weight: .semibold))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundColor(isActive ? .accentColor : .primary)
+            HStack(spacing: 5) {
+                Text(clip.fileName)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1).truncationMode(.middle)
+                    .foregroundColor(isActive ? .accentColor : .primary)
+                    .layoutPriority(1)
+                if !clip.cameraName.isEmpty {
+                    MetadataBadge(name: cameraModel, fontSize: 9)
+                        .frame(maxWidth: 120)
+                }
+            }
+            .help(clip.fileNameWithCamera)
             
             // Thumbnail
             // Size the container before adding its content. An image or loading
@@ -269,10 +285,8 @@ struct ClipRowView: View {
                 }
             
             // Metadata
-            Text("\(clip.nativeWidth)×\(clip.nativeHeight)  \(String(format: "%.1f", clip.frameRate))fps  \(clip.frameCount)f")
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
+            MetadataBadge(name: clip.durationTimecode, fontSize: 9)
+                .help("Duration (hours:minutes:seconds:frames)")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 8)

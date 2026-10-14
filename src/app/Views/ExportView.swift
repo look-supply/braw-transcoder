@@ -128,35 +128,48 @@ struct ExportView: View {
             : codecs[selectedCodec]
     }
 
-    private var settingsSummaryLines: [String] {
+    private var settingsSummaryAttributes: [String] {
         let outputFolder = useSourceDirectory ? "Same as source" : resolvedOutputDirectory
         let dimensions = project.selectedClip == nil
             ? (resolutions.first { $0.mode == effectiveResolution }?.label ?? "Original resolution")
             : estimatedOutput
         if selectedCodec == 2 {
-            return [selectedFormat, "\(dimensions) · \(outputFolder)"]
+            return [selectedFormat, dimensions, outputFolder]
         }
         let chroma = chromaModes[selectedChroma]
-        let compression = selectedCodec == 1 ? "\(gopModes[selectedGOPMode]) · " : ""
-        return ["\(selectedFormat) · \(compression)\(chroma) · \(dataRates[selectedDataRate])",
-                "\(dimensions) · \(outputFolder)"]
+        var attributes = [selectedFormat]
+        if selectedCodec == 1 { attributes.append(gopModes[selectedGOPMode]) }
+        attributes += [chroma, dataRates[selectedDataRate], dimensions, outputFolder]
+        return attributes
     }
 
     private var settingsSummary: String {
-        let settings = settingsSummaryLines.joined(separator: " · ")
+        let settings = settingsSummaryAttributes.joined(separator: ", ")
         let presetIndex = presetSelection.wrappedValue
         guard presetIndex > 0 else { return settings }
         return "\(savedPresets[presetIndex - 1].name): \(settings)"
     }
 
     private var formatSummary: some View {
-        Text(settingsSummary)
-            .font(.system(size: 11, weight: .medium))
-            .lineLimit(1).truncationMode(.tail)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .help(settingsSummary)
-            .accessibilityLabel("Export settings: \(settingsSummary)")
-            .accessibilityIdentifier("export-format-summary")
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                let presetIndex = presetSelection.wrappedValue
+                if presetIndex > 0 {
+                    Text(savedPresets[presetIndex - 1].name)
+                        .font(.system(size: 11, weight: .medium))
+                }
+                ForEach(Array(settingsSummaryAttributes.enumerated()), id: \.offset) { _, attribute in
+                    MetadataBadge(name: attribute, fontSize: 11)
+                        .fixedSize()
+                }
+            }
+        }
+        .frame(height: 24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help(settingsSummary)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Export settings: \(settingsSummary)")
+        .accessibilityIdentifier("export-format-summary")
     }
 
     private var settingsButton: some View {

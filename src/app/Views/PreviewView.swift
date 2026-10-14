@@ -338,23 +338,24 @@ struct PreviewHeader: View {
     @ObservedObject var clip: ClipModel
     let isExporting: Bool
 
-    private var colorInfo: String {
-        [clip.renderedGamma, "Gen \(clip.colorScienceGen)"]
-            .filter { !$0.isEmpty }.joined(separator: " · ")
-    }
-
     private var details: some View {
         HStack(spacing: 6) {
             Text(clip.fileName).font(.system(size: 12, weight: .medium))
                 .lineLimit(1).truncationMode(.middle)
                 .help(clip.fileName)
-            Text("\(clip.renderDimensions.width)×\(clip.renderDimensions.height) · \(String(format: "%.2f", clip.frameRate)) fps")
-                .font(.system(size: 10)).foregroundStyle(.secondary)
+            if !clip.cameraName.isEmpty {
+                MetadataBadge(name: clip.cameraName, fontSize: 10)
+                    .fixedSize()
+            }
+            MetadataBadge(name: "\(clip.renderDimensions.width)×\(clip.renderDimensions.height)", fontSize: 10)
                 .fixedSize()
-            Text("· \(colorInfo)")
-                .font(.system(size: 10)).foregroundStyle(.secondary)
-                .lineLimit(1).truncationMode(.tail)
-                .help(colorInfo)
+            MetadataBadge(name: "\(String(format: "%.2f", clip.frameRate)) fps", fontSize: 10)
+                .fixedSize()
+            if !clip.renderedGamma.isEmpty {
+                MetadataBadge(name: clip.renderedGamma, fontSize: 10)
+            }
+            MetadataBadge(name: "Gen \(clip.colorScienceGen)", fontSize: 10)
+                .fixedSize()
         }
     }
     private var modes: some View {
@@ -384,9 +385,8 @@ struct PreviewHeader: View {
         }.fixedSize()
     }
     private func zoomButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Image(systemName: symbol).frame(width: 16, height: 16) }
-            .buttonStyle(.bordered).controlSize(.small).font(.system(size: 12))
-            .help(title).accessibilityLabel(title)
+        PreviewZoomButton(title: title, symbol: symbol, action: action)
+            .frame(width: 30, height: 22)
     }
     private var controls: some View {
         ViewThatFits(in: .horizontal) {
@@ -484,5 +484,36 @@ private struct FalseColorToggle: NSViewRepresentable {
         var parent: FalseColorToggle
         init(_ parent: FalseColorToggle) { self.parent = parent }
         @objc func changed(_ button: NSButton) { parent.isOn = button.state == .on }
+    }
+}
+
+/// Keep the click target stable while zoom updates redraw the SwiftUI header.
+struct PreviewZoomButton: NSViewRepresentable {
+    let title: String
+    let symbol: String
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> Control { Control(frame: .zero) }
+    func updateNSView(_ button: Control, context: Context) {
+        button.onPress = action
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        button.toolTip = title
+        button.setAccessibilityLabel(title)
+        button.setAccessibilityIdentifier(symbol)
+    }
+    final class Control: NSButton {
+        var onPress: (() -> Void)?
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            title = ""
+            bezelStyle = .rounded
+            controlSize = .small
+            imagePosition = .imageOnly
+            target = self
+            action = #selector(pressed)
+            sendAction(on: .leftMouseDown)
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        @objc private func pressed() { onPress?() }
     }
 }

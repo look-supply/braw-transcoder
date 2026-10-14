@@ -69,6 +69,14 @@ import SwiftUI
         window.orderFront(nil)
         defer { view.removeMonitor(); window.orderOut(nil); clip.resetZoom() }
         let center = NSPoint(x: 200, y: 150)
+        let zoomButton = PreviewZoomButton.Control(frame: .zero)
+        zoomButton.onPress = clip.zoomIn
+        clip.resetZoom()
+        for _ in 0..<12 { zoomButton.performClick(nil) }
+        precondition(clip.previewZoom == 8, "Repeated Zoom In clicks did not reach 800 percent")
+        zoomButton.onPress = clip.zoomOut
+        for _ in 0..<20 { zoomButton.performClick(nil) }
+        precondition(clip.previewZoom == 0.25, "Repeated Zoom Out clicks did not reach 25 percent")
         clip.resetZoom()
         precondition(!view.handleScroll(deltaX: 20, deltaY: 10, precise: true, modifiers: .shift, location: center, eventWindow: window),
                      "Shift-scroll pan changed a fitted image")
@@ -157,6 +165,10 @@ import SwiftUI
                          "Signed PCM conversion failed for \(bits)-bit audio")
         }
         precondition(PlaybackPCM.floats(Data([0]), bits: 24) == nil)
+        precondition(ClipModel.durationTimecode(frames: 290, fps: 23.976) == "00:00:12:02")
+        precondition(ClipModel.durationTimecode(frames: 25 * 3661 + 7, fps: 25) == "01:01:01:07")
+        precondition(ClipModel.durationTimecode(frames: 0, fps: 24) == "00:00:00:00")
+        precondition(ClipModel.durationTimecode(frames: 1, fps: 0) == "--:--:--:--")
         try checkMetalPixels()
 
         precondition(CommandLine.arguments.count >= 2, "Pass a BRAW fixture")

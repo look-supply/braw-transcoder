@@ -212,3 +212,7 @@ if(EXISTS "${BRAW_SDK_ROOT}/../Media/sample.braw")
     add_test(NAME adjusted_thumbnails COMMAND braw_model_test "${BRAW_SDK_ROOT}/../Media/sample.braw")
     set_tests_properties(adjusted_thumbnails PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 60)
 endif()
+
+foreach(badge_target BrawTranscoder braw_export_panel_test braw_preview_monitoring_test braw_playback_test)
+    target_sources(${badge_target} PRIVATE src/app/Views/MetadataBadge.swift)
+endforeach()
