@@ -10,7 +10,7 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Assets").font(.headline).foregroundColor(.secondary)
+                Text("Clips").font(.headline).foregroundColor(.secondary)
                 Spacer()
                 if !project.selectedIndices.isEmpty {
                     Text("\(project.selectedIndices.count) selected")
@@ -79,13 +79,16 @@ struct SidebarView: View {
             .overlay {
                 if project.clipCount == 0 {
                     VStack(spacing: 8) {
-                        Image(systemName: "tray.and.arrow.down")
-                            .font(.title2)
-                        Text("Drop BRAW files here")
-                        Text("or use + to import")
-                            .font(.caption)
+                        Image(systemName: "film.stack")
+                            .font(.system(size: 28))
+                            .foregroundColor(.secondary.opacity(0.5))
+                            .padding(.bottom, 4)
+                        Text("Add or drag clips here")
+                            .font(.callout)
+                            .foregroundColor(.secondary)
                     }
-                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
                     .allowsHitTesting(false)
                 }
             }

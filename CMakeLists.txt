@@ -89,6 +89,8 @@ if(BRAW_SANITIZER)
     target_compile_options(${PROJECT_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:Swift>:-sanitize=${BRAW_SANITIZER}>")
 endif()
 add_dependencies(${PROJECT_NAME} braw_worker)
+# Re-run the bundle's post-build copy/sign step when only the worker changes.
+set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY LINK_DEPENDS "$<TARGET_FILE:braw_worker>")
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     MACOSX_BUNDLE TRUE
@@ -216,3 +218,32 @@ endif()
 foreach(badge_target BrawTranscoder braw_export_panel_test braw_preview_monitoring_test braw_playback_test)
     target_sources(${badge_target} PRIVATE src/app/Views/MetadataBadge.swift)
 endforeach()
+
+foreach(inspector_target BrawTranscoder braw_playback_test)
+    target_sources(${inspector_target} PRIVATE src/app/Views/MetadataInspectorView.swift)
+endforeach()
+
+add_executable(braw_inspector_metadata_test test/inspector_metadata.swift src/app/ProjectModel.swift
+    src/app/PlaybackAudio.swift src/app/RGBWaveform.swift src/app/PreviewMonitoring.swift
+    src/app/Views/MetadataInspectorView.swift)
+target_include_directories(braw_inspector_metadata_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(braw_inspector_metadata_test PRIVATE
+    "SHELL:-import-objc-header ${CMAKE_SOURCE_DIR}/src/bridge/braw_api.h")
+target_link_libraries(braw_inspector_metadata_test PRIVATE braw_core "-framework AppKit"
+    "-framework SwiftUI" "-framework AVFoundation")
+add_dependencies(braw_inspector_metadata_test braw_worker)
+if(EXISTS "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    add_test(NAME inspector_metadata COMMAND braw_inspector_metadata_test "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    set_tests_properties(inspector_metadata PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 30)
+endif()
+
+add_executable(braw_camera_metadata_test test/camera_metadata.cpp)
+target_include_directories(braw_camera_metadata_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${BRAW_SDK_INCLUDE})
+target_compile_definitions(braw_camera_metadata_test PRIVATE BRAW_SDK_LIBRARY_PATH="${BRAW_SDK_FRAMEWORK_DIR}")
+target_link_libraries(braw_camera_metadata_test PRIVATE braw_core "-framework CoreFoundation")
+add_dependencies(braw_camera_metadata_test braw_worker)
+add_test(NAME camera_metadata COMMAND braw_camera_metadata_test)
+if(EXISTS "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    add_test(NAME inspector_metadata_transport COMMAND braw_camera_metadata_test "${BRAW_SDK_ROOT}/../Media/sample.braw")
+    set_tests_properties(inspector_metadata_transport PROPERTIES ENVIRONMENT "BRAW_DECODE_PIPELINE=cpu" TIMEOUT 30)
+endif()

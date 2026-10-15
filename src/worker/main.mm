@@ -24,6 +24,8 @@ int main() {
                 auto audio=decoder.GetAudioInfo();
                 NSMutableDictionary* metadata=[NSMutableDictionary dictionary];
                 for(auto& [key,value]:decoder.GetFreeFormMetadata())metadata[str(key)]=str(value);
+                NSMutableDictionary* inspectorMetadata=[NSMutableDictionary dictionary];
+                for(auto& [key,value]:decoder.GetFreeFormMetadata(true))inspectorMetadata[str(key)]=str(value);
                 NSMutableArray* isoList=[NSMutableArray array];
                 for(auto iso:decoder.GetISOList())[isoList addObject:@(iso)];
                 NSMutableArray* geometry=[NSMutableArray array];
@@ -42,7 +44,7 @@ int main() {
                     @"toneMinimum":minimum,@"toneMaximum":maximum,@"videoBlack":@(tone.videoBlack),@"videoBlackSupported":@(tone.videoBlackSupported),
                     @"isoList":isoList,@"isoReadOnly":@(decoder.ISOIsReadOnly()),
                     @"tint":@(decoder.GetNativeTint()),@"exposure":@(decoder.GetNativeExposure()),
-                    @"sdk":str(decoder.Version()),@"metadata":metadata,
+                    @"sdk":str(decoder.Version()),@"metadata":metadata,@"inspectorMetadata":inspectorMetadata,
                     @"hasEmbeddedLUT":@(decoder.HasEmbeddedLUT()),@"embeddedLUTName":str(decoder.EmbeddedLUTName()),
                     @"audioRate":@(audio.rate),@"audioChannels":@(audio.channels),
                     @"audioBits":@(audio.bits),@"audioSamples":@(audio.samples)};

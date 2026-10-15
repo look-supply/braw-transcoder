@@ -23,6 +23,7 @@ ProRes delivery and storage reduction are different goals. **ProRes is not guara
 ## What you can do
 
 - **Review before converting.** Play, scrub, zoom, and inspect clips with audio, an RGB waveform, and false color.
+- **Inspect source metadata.** Switch the Inspector to Metadata to search and copy readable camera, lens, recording, production, and color information. Binary LUT payloads and internal calibration data are omitted. Frame metadata reflects the first frame; image adjustments leave the recorded values intact.
 - **Set the image while you still have RAW access.** Adjust supported ISO values, white balance, tint, exposure, highlight recovery, and gamut compression before export.
 - **Prepare the frame.** Rotate, flip, and apply anamorphic desqueeze, including a custom ratio.
 - **Refine supported footage.** Use optional tone-curve and lens-correction controls when the source and SDK support them.

@@ -1,5 +1,6 @@
 #include "worker/SDKDecoder.h"
 #include "worker/Protocol.h"
+#include "worker/MetadataValue.h"
 #include "core/ImageGeometry.h"
 #include "core/ImageDesqueeze.h"
 #include "BlackmagicRawAPI.h"
@@ -39,7 +40,7 @@ struct SDKDecoder::Impl {
     uint32_t previewWidth=0,previewHeight=0;
     Frame frame;
     std::string cameraType, version;
-    std::map<std::string,std::string> frameMetadata;
+    std::map<std::string,std::string> frameMetadata, frameExportMetadata;
     static std::string FromCFString(CFStringRef s) {
         if (!s) return {};
         CFIndex n=CFStringGetMaximumSizeForEncoding(CFStringGetLength(s),kCFStringEncodingUTF8)+1;
@@ -50,29 +51,30 @@ struct SDKDecoder::Impl {
     void Finish(bool ok) { std::lock_guard lock(mutex); frameOK=ok; completed=true; cv.notify_one(); }
 };
 
-static std::map<std::string,std::string> ReadCameraMetadata(IBlackmagicRawMetadataIterator* iterator) {
+static std::map<std::string,std::string> ReadCameraMetadata(IBlackmagicRawMetadataIterator* iterator, std::map<std::string,std::string>* scalarMetadata = nullptr) {
     std::map<std::string,std::string> result;
     if(!iterator)return result;
     for(;;) {
         CFStringRef key=nullptr;
         if(FAILED(iterator->GetKey(&key))||!key)break;
-        Variant value;VariantInit(&value);
-        std::string text;
-        if(SUCCEEDED(iterator->GetData(&value))) {
-            switch(value.vt) {
-                case blackmagicRawVariantTypeString:text=SDKDecoder::Impl::FromCFString(value.bstrVal);break;
-                case blackmagicRawVariantTypeU8:text=std::to_string(value.uiVal & 0xff);break;
-                case blackmagicRawVariantTypeU16:text=std::to_string(value.uiVal);break;
-                case blackmagicRawVariantTypeU32:text=std::to_string(value.uintVal);break;
-                case blackmagicRawVariantTypeS16:text=std::to_string(value.iVal);break;
-                case blackmagicRawVariantTypeS32:text=std::to_string(value.intVal);break;
-                case blackmagicRawVariantTypeFloat32:if(std::isfinite(value.fltVal))text=std::to_string(value.fltVal);break;
-                case blackmagicRawVariantTypeFloat64:if(std::isfinite(value.dblVal))text=std::to_string(value.dblVal);break;
-                default:break; // Binary LUTs/arrays are not camera slate text.
-            }
-        }
         auto name=SDKDecoder::Impl::FromCFString(key);
-        if(!name.empty()&&!text.empty())result[name]=text;
+        // Binary LUT payloads are neither displayed nor exported. Avoid even
+        // fetching them: a textual byte array can inflate into megabytes.
+        if(name.ends_with("_data")) {
+            CFRelease(key);
+            if(iterator->Next()!=S_OK)break;
+            continue;
+        }
+        Variant value;VariantInit(&value);
+        const bool available = SUCCEEDED(iterator->GetData(&value));
+        const bool scalar = value.vt != blackmagicRawVariantTypeSafeArray && value.vt <= blackmagicRawVariantTypeFloat64;
+        const bool finite = (value.vt != blackmagicRawVariantTypeFloat32 || std::isfinite(value.fltVal)) &&
+                            (value.vt != blackmagicRawVariantTypeFloat64 || std::isfinite(value.dblVal));
+        if(!name.empty() && available && scalar && finite) {
+            const auto text = CameraMetadata::Value(value);
+            result[name]=text;
+            if(scalarMetadata && !text.empty())(*scalarMetadata)[name]=text;
+        }
         VariantClear(&value);CFRelease(key);
         if(iterator->Next()!=S_OK)break;
     }
@@ -102,15 +104,15 @@ public:
         if(!impl->nativeCaptured) {
             IBlackmagicRawMetadataIterator* iterator=nullptr;
             if(SUCCEEDED(frame->GetMetadataIterator(&iterator))&&iterator) {
-                impl->frameMetadata=ReadCameraMetadata(iterator);iterator->Release();
+                impl->frameMetadata=ReadCameraMetadata(iterator, &impl->frameExportMetadata);iterator->Release();
             }
             CFStringRef timecode=nullptr;
             if(SUCCEEDED(frame->GetTimecode(&timecode))&&timecode) {
-                impl->frameMetadata["timecode"]=SDKDecoder::Impl::FromCFString(timecode);CFRelease(timecode);
+                impl->frameMetadata["timecode"]=impl->frameExportMetadata["timecode"]=SDKDecoder::Impl::FromCFString(timecode);CFRelease(timecode);
             }
             float sensorRate=0;
             if(SUCCEEDED(frame->GetSensorRate(&sensorRate))&&sensorRate>0)
-                impl->frameMetadata["sensor_fps"]=std::to_string(sensorRate);
+                impl->frameMetadata["sensor_fps"]=impl->frameExportMetadata["sensor_fps"]=std::to_string(sensorRate);
             Variant v; VariantInit(&v);
             if(SUCCEEDED(attrs->GetFrameAttribute(blackmagicRawFrameProcessingAttributeISO,&v))) impl->nativeISO=v.uintVal;
             VariantClear(&v); VariantInit(&v);
@@ -459,7 +461,7 @@ void SDKDecoder::Close() {
     if(p.callback){p.callback->Release();p.callback=nullptr;}
     if(p.factory){p.factory->Release();p.factory=nullptr;}
     p.device=nil;p.queue=nil;p.nativeCaptured=false;p.width=0;p.height=0;
-    p.frameMetadata.clear();p.isoList.clear();p.isoReadOnly=true;p.lensCorrectionSupport=0;p.toneInfo={};p.geometryInfo={};
+    p.frameMetadata.clear();p.frameExportMetadata.clear();p.isoList.clear();p.isoReadOnly=true;p.lensCorrectionSupport=0;p.toneInfo={};p.geometryInfo={};
 }
 bool SDKDecoder::Decode(uint64_t index,const ClipAdjustments& a,float scale,Frame& out) {
     auto& p=*m_impl;

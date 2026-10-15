@@ -25,8 +25,6 @@ struct PreviewView: View {
                     ZStack {
                         Color.black.opacity(0.92)
                         VStack(spacing: 12) {
-                            Image(systemName: "film.stack").font(.system(size: 56))
-                                .foregroundColor(.white.opacity(0.15))
                             Text("No Clip Selected").font(.title3)
                                 .foregroundColor(.white.opacity(0.35))
                             Text("Import a BRAW file or select a clip from the sidebar")

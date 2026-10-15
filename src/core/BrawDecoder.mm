@@ -6,7 +6,7 @@ using namespace WorkerProtocol;
 struct BrawDecoder::Impl {
     ChildProcess child;
     std::string path,error,version,camera,gamma,gamut;
-    std::map<std::string,std::string> metadata;
+    std::map<std::string,std::string> metadata,inspectorMetadata;
     uint32_t width=0,height=0,iso=0,temperature=0;
     std::vector<uint32_t> isoList;
     bool isoReadOnly=true;
@@ -74,6 +74,7 @@ struct BrawDecoder::Impl {
         version=[info[@"sdk"] UTF8String]?:"";camera=[info[@"camera"] UTF8String]?:"";
         gamma=[info[@"gamma"] UTF8String]?:"";gamut=[info[@"gamut"] UTF8String]?:"";
         metadata.clear();for(NSString* key in info[@"metadata"])metadata[key.UTF8String]=[info[@"metadata"][key] UTF8String];
+        inspectorMetadata.clear();for(NSString* key in info[@"inspectorMetadata"])inspectorMetadata[key.UTF8String]=[info[@"inspectorMetadata"][key] UTF8String];
         audio.rate=[info[@"audioRate"] unsignedIntValue];audio.channels=[info[@"audioChannels"] unsignedIntValue];
         audio.bits=[info[@"audioBits"] unsignedIntValue];audio.samples=[info[@"audioSamples"] unsignedLongLongValue];
         if(!width||!height||!frames||fps<=0){error="Clip has no valid video";child.Stop();return false;}
@@ -122,6 +123,7 @@ bool BrawDecoder::SaveEmbeddedLUT(const std::string& path) {
     p.error.clear();return true;
 }
 std::map<std::string,std::string> BrawDecoder::GetFreeFormMetadata() const{return m_impl->metadata;}
+std::map<std::string,std::string> BrawDecoder::GetInspectorMetadata() const{return m_impl->inspectorMetadata;}
 std::vector<uint32_t> BrawDecoder::GetISOList(){return m_impl->isoList;}
 void BrawDecoder::SetOutputFormat(int format){m_impl->format=format;}
 void BrawDecoder::SetCancellation(const std::atomic<bool>* cancel){m_impl->cancel=cancel;}

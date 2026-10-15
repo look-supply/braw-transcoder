@@ -41,7 +41,7 @@ public:
     std::string GetClipGamma() const;
     std::string GetClipGamut() const;
     uint16_t GetColorScienceGen() const;
-    std::map<std::string,std::string> GetFreeFormMetadata() const;
+    std::map<std::string,std::string> GetFreeFormMetadata(bool includeAll = false) const;
     bool GetAudioFormat(uint32_t*,uint32_t*);
     GyroData ExtractGyroData();
     std::string Version() const;

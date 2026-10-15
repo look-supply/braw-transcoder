@@ -1,6 +1,10 @@
 import SwiftUI
 
 enum InspectorPanel: CaseIterable { case raw, anamorphic, tone, lens }
+enum InspectorTab: String, CaseIterable {
+    case raw = "RAW Adjustments"
+    case metadata = "Metadata"
+}
 
 private struct CustomDesqueezeField: View {
     @ObservedObject var clip: ClipModel
@@ -83,6 +87,7 @@ struct InspectorSection<Content: View>: View {
 struct InspectorView: View {
     @ObservedObject var project: ProjectModel
     @State private var expandedPanels: Set<InspectorPanel> = [.raw]
+    @State private var selectedTab: InspectorTab = .raw
     
     var body: some View {
         VStack(spacing: 0) {
@@ -96,16 +101,30 @@ struct InspectorView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             
             Divider()
+
+            Picker("Inspector tab", selection: $selectedTab) {
+                ForEach(InspectorTab.allCases, id: \.self) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(12)
             
             if let clip = project.selectedClip {
-                InspectorContent(clip: clip, project: project, expandedPanels: $expandedPanels)
-                    .frame(minHeight: 0, maxHeight: .infinity)
-                Divider()
-                InspectorFooter(clip: clip, project: project)
-                    .fixedSize(horizontal: false, vertical: true)
-                if project.waveformVisible {
+                if selectedTab == .raw {
+                    InspectorContent(clip: clip, project: project, expandedPanels: $expandedPanels)
+                        .frame(minHeight: 0, maxHeight: .infinity)
                     Divider()
-                    RGBWaveformView(clip: clip) { project.waveformVisible = false }
+                    InspectorFooter(clip: clip, project: project)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if project.waveformVisible {
+                        Divider()
+                        RGBWaveformView(clip: clip) { project.waveformVisible = false }
+                    }
+                } else {
+                    MetadataInspectorView(clip: clip)
+                        .frame(minHeight: 0, maxHeight: .infinity)
                 }
             } else {
                 Spacer()
@@ -181,7 +200,7 @@ struct InspectorContent: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 geometryButtons
-                InspectorSection(title: "RAW adjustments", summary: rawSummary, isExpanded: expansion(.raw)) {
+                InspectorSection(title: "Raw Controls", summary: rawSummary, isExpanded: expansion(.raw)) {
                     VStack(alignment: .leading, spacing: 12) {
                         // ── ISO Preset Dropdown ──────────────
                         VStack(alignment: .leading, spacing: 4) {

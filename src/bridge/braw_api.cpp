@@ -118,7 +118,7 @@ BrawClipHandle* braw_clip_open(const char* path) {
         h->adjustments.colorTemp  = h->nativeColorTemp;
         h->adjustments.tint       = h->nativeTint;
         // Read free-form metadata
-        auto ffm = h->decoder->GetFreeFormMetadata();
+        auto ffm = h->decoder->GetInspectorMetadata();
         h->freeFormMetadata.assign(ffm.begin(), ffm.end());
     }
     if (!h->nativeWidth) { fprintf(stderr,"Import failed: %s\n",h->decoder->LastError().c_str()); delete h; return nullptr; }

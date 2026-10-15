@@ -387,6 +387,8 @@ final class ClipModel: Identifiable, ObservableObject {
     private var _fileName: String = ""
     var fileName: String { _fileName }
     private(set) var cameraName: String = ""
+    // A source snapshot: editing decode settings must never rewrite these values.
+    private(set) var sourceMetadata: [String: String] = [:]
     var fileNameWithCamera: String {
         cameraName.isEmpty ? fileName : "\(fileName) \(cameraName)"
     }
@@ -442,6 +444,10 @@ final class ClipModel: Identifiable, ObservableObject {
         if let h = self.handle {
             _fileName = String(cString: braw_clip_get_filename(h))
             cameraName = String(cString: braw_clip_get_camera_type(h)).trimmingCharacters(in: .whitespacesAndNewlines)
+            for index in 0..<braw_clip_get_metadata_count(h) {
+                let key = String(cString: braw_clip_get_metadata_key(h, index))
+                sourceMetadata[key] = String(cString: braw_clip_get_metadata_value(h, index))
+            }
             hasEmbeddedLUT = braw_clip_has_embedded_lut(h)
             embeddedLUTName = String(cString: braw_clip_embedded_lut_name(h))
             let fullPath = String(cString: braw_clip_get_filepath(h))

@@ -28,14 +28,23 @@ std::string SDKDecoder::GetClipGamut() const {
     return result;
 }
 
-std::map<std::string, std::string> SDKDecoder::GetFreeFormMetadata() const {
+std::map<std::string, std::string> SDKDecoder::GetFreeFormMetadata(bool includeAll) const {
     std::map<std::string, std::string> result;
     if (!m_impl->clip) return result;
     IBlackmagicRawMetadataIterator* it = nullptr;
-    if (FAILED(m_impl->clip->GetMetadataIterator(&it)) || !it) return result;
-    result=ReadCameraMetadata(it);
-    it->Release();
-    for(const auto& [key,value]:m_impl->frameMetadata)result[key]=value;
+    if (SUCCEEDED(m_impl->clip->GetMetadataIterator(&it)) && it) {
+        std::map<std::string,std::string> scalar;
+        auto all=ReadCameraMetadata(it, &scalar);
+        result=includeAll ? std::move(all) : std::move(scalar);
+        it->Release();
+    }
+    for(const auto& [key,value]:includeAll ? m_impl->frameMetadata : m_impl->frameExportMetadata) {
+        // Preserve a differing clip value while keeping the established frame
+        // value at the original key for consumers such as MOV export.
+        auto clipValue=result.find(key);
+        if(includeAll&&clipValue!=result.end()&&clipValue->second!=value)result["clip."+key]=clipValue->second;
+        result[key]=value;
+    }
     return result;
 }
 
